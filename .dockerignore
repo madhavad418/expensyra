@@ -1,0 +1,26 @@
+# Never send local data or secrets into the image build.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.log
+*.png
+!public/**/*.png
+scripts
+docs
+TEST_REPORT.txt
+BUILD_INFO.txt
+docker-compose.yml
+start-local.ps1
+.DS_Store

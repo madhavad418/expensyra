@@ -1,0 +1,43 @@
+JSAN Expensyra Pleo API Phase 1 - Build Verification
+Date: 2026-09-22
+Version: 1.2.0
+
+Static/runtime checks:
+PASS - server.js syntax
+PASS - public/app.js syntax
+PASS - no third-party runtime npm dependencies
+PASS - no production Pleo key bundled
+PASS - no default production user/password bundled
+PASS - JSAN local product mark bundled
+PASS - JSAN ink/mint design tokens present
+PASS - editorial page-header system present
+PASS - six-stage Sync → Report operating rail present
+PASS - JSAN delivery language present
+PASS - responsive mobile navigation present
+
+Automated end-to-end smoke test (isolated SQLite database, Pleo mock API):
+PASS - server health endpoint
+PASS - first administrator setup
+PASS - secure login/session cookie
+PASS - Pleo connection test
+PASS - Pleo Export V2 sync: 18 transactions inserted
+PASS - reviewer account creation
+PASS - transaction allocation
+PASS - temporary-password change enforcement
+PASS - reviewer queue isolation
+PASS - Start Validation work session
+PASS - heartbeat
+PASS - Approved review with PROJECT_COST + HERE-UK classification
+PASS - daily reviewer validation count
+PASS - reviewer approved count
+PASS - reviewer pending count
+PASS - dashboard total count
+
+Command:
+  npm run check && npm run test:brand && npm run test:smoke
+
+Important live-environment validation still required:
+- Run Test Connection using JSAN's own Pleo Standalone API Key/company ID in deployment secrets.
+- Confirm the actual key has the read scopes required by the selected connector.
+- Spot-check live field mappings and receipt access against JSAN's Pleo tenant.
+- Use a persistent /data volume and HTTPS before production use.

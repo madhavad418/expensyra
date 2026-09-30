@@ -1,0 +1,28 @@
+{
+  "name": "jsan-expensyra-pleo-phase1",
+  "version": "1.2.1",
+  "private": true,
+  "description": "JSAN Expensyra — Expense Intelligence & Validation",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check lib/db.mjs && node --check lib/db-pg-worker.mjs && node --check lib/precedence.mjs && node --check public/app.js",
+    "test:smoke": "node scripts/smoke-test.mjs",
+    "test:brand": "node scripts/brand-check.mjs",
+    "test:pleo": "node scripts/test-pleo-connector.mjs",
+    "test:precedence": "node scripts/test-precedence.mjs",
+    "test:analytics": "node scripts/test-analytics.mjs",
+    "test:car-rentals": "node scripts/test-car-rentals.mjs",
+    "test:daily-sync": "node scripts/test-daily-sync.mjs",
+    "car-rentals:import": "node scripts/build-car-rental-cache.mjs",
+    "snapshot:create": "node scripts/create-reconciliation-snapshot.mjs",
+    "gate:report": "node scripts/reconciliation-gate-report.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
+}

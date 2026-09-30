@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+data/*
+!data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store
+# Real Pleo expense exports: company data, never committed.
+*.xlsx
+*.xls
+*.csv

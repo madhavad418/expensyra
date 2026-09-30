@@ -1,0 +1,19 @@
+services:
+  spendops:
+    build: .
+    container_name: jsan-spendops
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4173
+      DATABASE_PATH: /data/spendops.db
+      ATTACHMENT_DIR: /data/attachments
+    ports:
+      - "4173:4173"
+    volumes:
+      - spendops_data:/data
+
+volumes:
+  spendops_data:

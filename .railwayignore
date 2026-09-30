@@ -1,0 +1,16 @@
+# Files `railway up` must never upload: local data and secrets.
+# Production data lives in Railway Postgres and is filled by Pleo syncs.
+.env
+.env.*
+!.env.example
+node_modules/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.log

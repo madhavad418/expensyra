@@ -1,0 +1,9 @@
+JSAN Expensyra
+Version: 1.2.1
+Build: Pleo API Phase 1 — JSAN Brand Alignment Edition
+Build date: 22 September 2026
+Runtime: Node.js 22.5+
+Persistence: SQLite (single-instance Phase 1)
+Deployment: Docker / Docker Compose / Railway
+Ingestion: Pleo External API, Export API V2 default; Accounting Entries connector included
+UI: JSAN website-aligned internal product system
