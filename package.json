@@ -19,6 +19,7 @@
     "test:car-rentals": "node scripts/test-car-rentals.mjs",
     "test:daily-sync": "node scripts/test-daily-sync.mjs",
     "car-rentals:import": "node scripts/build-car-rental-cache.mjs",
+    "projects:push": "node scripts/push-projects.mjs",
     "snapshot:create": "node scripts/create-reconciliation-snapshot.mjs",
     "gate:report": "node scripts/reconciliation-gate-report.mjs"
   },
