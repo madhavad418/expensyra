@@ -23,7 +23,7 @@ async function renderCarRentals(c,preserveOpen='',refresh=false){
   if(preserveOpen)document.querySelector(`.car-filter[data-filter-key="${preserveOpen}"]`)?.setAttribute('open','');
 }
 const root=document.querySelector('#app');const toastEl=document.querySelector('#toast');
-const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new Set(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
+const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new Set(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtMoney=(n,c='GBP')=>{try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:c||'GBP'}).format(Number(n||0));}catch{return `${c||''} ${Number(n||0).toFixed(2)}`}};
 const fmtTime=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=Math.floor(s%60);return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`};
@@ -137,29 +137,39 @@ const transactionAmount=r=>r.pleo_status==='PENDING'?'<b>'+esc(fmtMoney(r.amount
 const statusChip=r=>`<span class="status s-${r.status}">${r.status.replaceAll('_',' ')}</span>`;
 // A Pleo team IS the JSAN project; the name shown is the Pleo team name.
 const projectCell=r=>esc(r.effective_project_name||r.team_name||'—');
+// Initials avatar with a stable per-name hue, so a person is recognisable at a glance down the list.
+function personCell(name){
+  if(!name)return '<span class="muted">—</span>';
+  const initials=String(name).trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase();
+  let x=2166136261;for(const ch of String(name)){x^=ch.charCodeAt(0);x=Math.imul(x,16777619)}
+  const h=[210,160,25,280,340,45,190,120][(x>>>0)%8];
+  return `<span class="tx-person"><span class="tx-avatar" style="--h:${h}" aria-hidden="true">${esc(initials)}</span><b>${esc(name)}</b></span>`;
+}
+const receiptCell=r=>r.receipt_count?`<span class="tx-receipt ok" title="${r.receipt_count} receipt(s)">📎 ${r.receipt_count}</span>`:'<span class="tx-receipt missing" title="No receipt evidence">None</span>';
 const TX_COLUMNS={
   compact:[
-    ['Status',statusChip],['Pleo status',pleoStatusChip],['Date',r=>esc(fmtDate(r.transaction_date))],
-    ['Employee',r=>`<b>${esc(r.employee_name||r.employee_id||'—')}</b>`],
-    ['Merchant',r=>esc(r.merchant||'—'),'clip'],['Project',projectCell,'clip'],
-    ['Category',r=>esc(r.resolved_category_name||r.category||r.expense_type||'—'),'clip'],
+    ['Status',statusChip,'','status'],['Pleo status',pleoStatusChip],['Date',r=>esc(fmtDate(r.transaction_date)),'','date'],
+    ['Employee',r=>personCell(r.employee_name||r.employee_id),'','employee'],
+    ['Merchant',r=>esc(r.merchant||'—'),'clip','merchant'],['Project',projectCell,'clip','project'],
+    ['Category',r=>esc(r.resolved_category_name||r.category||r.expense_type||'—'),'clip','category'],
     ['Commercial Classification',commercialCell,'clip'],
-    ['Amount',transactionAmount,'money'],
-    ['Reviewer',r=>esc(r.reviewer_name||'Unallocated')],
+    ['Evidence',receiptCell,'','receipts'],
+    ['Amount',transactionAmount,'money','amount'],
+    ['Reviewer',r=>r.reviewer_name?esc(r.reviewer_name):'<span class="muted">Unallocated</span>','','reviewer'],
   ],
   excel:[
-    ['Date',r=>esc(fmtDate(r.transaction_date))],
+    ['Date',r=>esc(fmtDate(r.transaction_date)),'','date'],
     ['Expense Type',r=>esc(expenseTypeLabel(r))],
     ['Pleo status',pleoStatusChip],
-    ['Amount',transactionAmount,'money'],
+    ['Amount',transactionAmount,'money','amount'],
     ['Orig. amount',r=>netAmountCell(r.amount,r.currency,r),'money'],
-    ['Source description',r=>esc(r.merchant||'—'),'clip'],
-    ['Category',r=>esc(r.resolved_category_name||r.category||'—'),'clip'],
+    ['Source description',r=>esc(r.merchant||'—'),'clip','merchant'],
+    ['Category',r=>esc(r.resolved_category_name||r.category||'—'),'clip','category'],
     ['Commercial Classification',commercialCell,'clip'],
-    ['Owner',r=>esc(r.employee_name||'—')],
+    ['Owner',r=>personCell(r.employee_name),'','employee'],
     ['Note',r=>`<span class="small">${esc(r.note||'')}</span>`,'clip'],
-    ['Project',projectCell,'clip'],
-    ['Receipts',r=>r.receipt_count?`${r.receipt_count}`:'<span class="muted">none</span>'],
+    ['Project',projectCell,'clip','project'],
+    ['Receipts',receiptCell,'','receipts'],
     ['Employee Code',r=>esc(r.employee_code||'—')],
     ['Review Status',r=>esc(PLEO_REVIEW_LABELS[r.pleo_review_status]||r.pleo_review_status||'—')],
     ['Reviewer (Pleo)',r=>`<span class="small">${esc(r.pleo_reviewer_names||'')}</span>`,'clip'],
@@ -168,15 +178,22 @@ const TX_COLUMNS={
     ['Expense ID',r=>`<span class="small muted">${esc(r.pleo_accounting_entry_id)}</span>`],
     ['Export Status',r=>esc(r.pleo_export_status||'—')],
     ['Billing Status',r=>esc(r.pleo_billing_status_tag_name||'—')],
-    ['JSAN Status',statusChip],
-    ['JSAN Reviewer',r=>esc(r.reviewer_name||'Unallocated')],
+    ['JSAN Status',statusChip,'','status'],
+    ['JSAN Reviewer',r=>r.reviewer_name?esc(r.reviewer_name):'<span class="muted">Unallocated</span>','','reviewer'],
   ],
 };
 function renderTxTable(rows){
   const cols=TX_COLUMNS[state.txView]||TX_COLUMNS.excel;
-  const head=`${canManage()?'<th><input id="tx-check-all" class="check" type="checkbox" aria-label="Select all on this page"></th>':''}${cols.map(([h,,cls])=>`<th${cls?` class="${cls}"`:''} style="white-space:nowrap">${esc(h)}</th>`).join('')}`;
-  const body=rows.length?rows.map(r=>`<tr class="clickable" data-open="${r.id}">${canManage()?`<td><input class="check tx-check" data-id="${r.id}" type="checkbox" ${state.selected.has(r.id)?'checked':''}></td>`:''}${cols.map(([,cell,cls])=>{const html=cell(r);return `<td${cls?` class="${cls}"`:''}${cls==='clip'?` title="${html.replace(/<[^>]*>/g,'')}"`:''}>${html}</td>`}).join('')}</tr>`).join(''):`<tr><td colspan="${cols.length+1}"><div class="empty">No transactions match this filter.</div></td></tr>`;
-  return `<div class="table-wrap"><table class="table tx-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const th=([h,,cls,key])=>{
+    if(!key)return `<th${cls?` class="${cls}"`:''}>${esc(h)}</th>`;
+    const on=state.txSort===key,dir=on?state.txDir:'';
+    return `<th class="${cls||''} sortable${on?' sorted':''}" aria-sort="${on?(dir==='asc'?'ascending':'descending'):'none'}"><button type="button" data-sort="${key}" title="Sort by ${esc(h)}">${esc(h)}<i aria-hidden="true">${on?(dir==='asc'?'▲':'▼'):'↕'}</i></button></th>`;
+  };
+  const head=`${canManage()?'<th class="tx-check-col"><input id="tx-check-all" class="check" type="checkbox" aria-label="Select all on this page"></th>':''}${cols.map(th).join('')}`;
+  const anyFilter=TX_FILTER_KEYS.some(k=>state.filters[k]);
+  const body=rows.length?rows.map(r=>`<tr class="clickable${state.selected.has(r.id)?' is-selected':''}" data-open="${r.id}" tabindex="0">${canManage()?`<td class="tx-check-col"><input class="check tx-check" data-id="${r.id}" type="checkbox" ${state.selected.has(r.id)?'checked':''} aria-label="Select transaction ${r.id}"></td>`:''}${cols.map(([,cell,cls])=>{const html=cell(r);return `<td${cls?` class="${cls}"`:''}${cls==='clip'?` title="${html.replace(/<[^>]*>/g,'')}"`:''}>${html}</td>`}).join('')}</tr>`).join('')
+    :`<tr><td colspan="${cols.length+1}"><div class="tx-empty"><div class="tx-empty-icon" aria-hidden="true">${ICON_SEARCH}</div><b>No transactions match</b><span>${anyFilter?'Try removing a filter or widening the date range.':'Sync from Pleo to bring transactions in.'}</span>${anyFilter?'<button type="button" class="btn btn-soft" data-reset-filters>Clear all filters</button>':''}</div></td></tr>`;
+  return `<div class="table-wrap tx-table-wrap"><table class="table tx-table${state.txDense?' is-dense':''}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 // Transactions page. The filter + allocation shell renders once; any filter
 // change re-queries and swaps only #tx-results — no "Apply" step, and typing
@@ -204,9 +221,8 @@ async function renderTransactions(c){
   const reviewers=(state.bootstrap.users||[]).filter(u=>u.role==='REVIEWER');
   const opt=(v,label,sel)=>`<option value="${esc(v)}" ${sel?'selected':''}>${esc(label)}</option>`;
   const projectSel=f.project_status==='MISSING_PROJECT'?'__missing':f.project;
-  c.innerHTML=pageHead(state.user.role==='REVIEWER'?'My validation queue':'Transaction allocation & validation','Pleo expenses are synced into a controlled queue. Allocation and JSAN validation remain separate from the raw Pleo record.','<button id="tx-open-export" type="button" class="btn btn-primary">Export Excel</button>'+(canSeeTeam()?'<button id="tx-open-removal" type="button" class="btn btn-soft">Remove imported data</button>':''))+`
+  c.innerHTML=pageHead(state.user.role==='REVIEWER'?'My validation queue':'Transaction allocation & validation','Pleo expenses are synced into a controlled queue. Allocation and JSAN validation remain separate from the raw Pleo record.',`<div class="tx-pop-anchor"><button id="tx-open-export" type="button" class="btn btn-primary" aria-haspopup="dialog" aria-expanded="false" aria-controls="tx-export-pop">Export Excel</button><div id="tx-export-pop" class="tx-popover" role="dialog" aria-label="Export Excel" hidden><div class="tx-pop-head"><b>Export to Excel</b><span>All columns, all rows in these dates — table filters are ignored.</span></div><div class="tx-pop-presets" role="group" aria-label="Quick ranges"><button type="button" data-export-preset="this">This month</button><button type="button" data-export-preset="last">Last month</button><button type="button" data-export-preset="30">Last 30 days</button></div><div class="tx-pop-dates"><label><span>From</span><input type="date" id="export-from" value="${esc(f.dateFrom)}"></label><label><span>To</span><input type="date" id="export-to" value="${esc(f.dateTo)}"></label></div><button type="button" id="tx-export-excel" class="btn btn-primary tx-pop-go">Download .xlsx</button></div></div>`+(canSeeTeam()?'<div class="tx-pop-anchor"><button id="tx-open-removal" type="button" class="btn btn-soft" aria-haspopup="dialog" aria-expanded="false" aria-controls="tx-removal-pop">Remove imported data</button><div id="tx-removal-pop" class="tx-popover tx-removal" role="dialog" aria-label="Remove imported data" hidden></div></div>':''))+`
   ${canSeeTeam()?'<section id="tx-sync" class="tx-sync" aria-label="Daily Pleo sync"></section>':''}
-  <details id="tx-export-panel" class="panel tx-export"><summary class="panel-head" style="cursor:pointer"><h3>Export Excel</h3><span class="small muted">Download by date range</span></summary><div class="panel-body"><p class="small muted">Exports all transaction columns and all rows in the selected dates, regardless of the table filters. Reviewers can export their assigned transactions. Dates follow the Transactions date column.</p><div class="toolbar"><label>From <input type="date" id="export-from" value="${esc(f.dateFrom)}"></label><label>To <input type="date" id="export-to" value="${esc(f.dateTo)}"></label><button type="button" id="tx-export-excel" class="btn btn-primary">Export Excel</button></div></div></details>
   <section class="tx-filters" aria-label="Filter transactions">
     <div class="tx-filter-heading"><div><h3>Find transactions</h3><span>Search your records or narrow the selection.</span></div><button type="button" id="tx-more-toggle" class="tx-more-toggle" aria-controls="tx-more-fields" aria-expanded="${Boolean(f.pleo_status||f.pleo_review||f.dateFrom||f.dateTo||f.source)}">More filters <span aria-hidden="true">+</span></button></div>
     <div class="tx-filter-grid">
@@ -224,16 +240,39 @@ async function renderTransactions(c){
     </div>
     <div class="tx-filter-foot"><div id="tx-chips" class="tx-chips"></div><button type="button" id="tx-show-pending" class="btn btn-soft">Pending Pleo entries</button><div id="tx-count" class="tx-count" aria-live="polite"></div></div>
   </section>
+  <section id="tx-insights" class="tx-insights" aria-label="Summary of matching transactions"></section>
   ${manage?`<section class="tx-alloc" aria-label="Allocate work">
     <div><div class="kicker">Allocate work</div><div class="tx-alloc-meta"><b id="tx-sel-count">${fmtCount(state.selected.size)}</b> selected <span aria-hidden="true">·</span> <b id="tx-match-count">—</b> matching filters</div></div>
     <div class="tx-alloc-actions"><select id="bulk-reviewer" aria-label="Reviewer">${reviewers.length?`<option value="">Choose reviewer…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}`:'<option value="">No reviewers yet — add one in Administration</option>'}</select>
     <button id="bulk-assign" class="btn btn-ghost-dark">Allocate selected</button><button id="bulk-assign-all" class="btn btn-accent" disabled>Assign all matching</button></div>
   </section>`:''}
-  ${state.user.role==='ADMIN'?`<details id="tx-import-removal" class="panel"><summary class="panel-head" style="cursor:pointer">Remove imported data</summary><div class="panel-body"><p>Remove unassigned, unreviewed imports for a transaction date range. Assigned or reviewed records are protected. This uses transaction dates, not the date you ran the sync, and ignores table filters. Pleo itself is unchanged; syncing these dates again can import the records again.</p><div class="toolbar"><label>From <input id="remove-import-from" type="date"></label><label>To <input id="remove-import-to" type="date"></label><button id="remove-import-preview" class="btn btn-soft">Preview removal</button></div><div id="remove-import-result" aria-live="polite"></div></div></details>`:''}
-  <div id="tx-results" class="tx-results"></div>`;
+  <div id="tx-results" class="tx-results"></div>
+  ${manage?`<div id="tx-bulkbar" class="tx-bulkbar" role="region" aria-label="Selected transactions" hidden><span class="tx-bulkbar-count"><b id="tx-bulk-count">0</b> selected</span><select id="tx-bulk-reviewer" aria-label="Reviewer for selected">${reviewers.length?`<option value="">Allocate to…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}`:'<option value="">No reviewers yet</option>'}</select><button id="tx-bulk-allocate" type="button" class="btn btn-accent">Allocate</button><button id="tx-bulk-clear" type="button" class="btn btn-ghost-dark">Clear</button></div>`:''}`;
 
-  c.querySelector('#tx-open-export').addEventListener('click',()=>{
-    const panel=c.querySelector('#tx-export-panel');panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'center'});c.querySelector('#export-from').focus({preventScroll:true});
+  // Header popovers (Export, Remove imported data): anchored to their button,
+  // one open at a time, closed by an outside click or Esc.
+  const popovers=[];
+  const anchorPopover=(btn,pop,onOpen)=>{
+    const set=open=>{
+      if(open)for(const o of popovers)if(o.pop!==pop)o.set(false);
+      pop.hidden=!open;btn.setAttribute('aria-expanded',String(open));if(open)onOpen?.();
+    };
+    btn.addEventListener('click',e=>{e.stopPropagation();set(pop.hidden)});
+    pop.addEventListener('click',e=>e.stopPropagation());
+    pop.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();set(false);btn.focus()}});
+    popovers.push({pop,set});return set;
+  };
+  const onDocClick=()=>{if(!document.body.contains(c.querySelector('#tx-export-pop')))return document.removeEventListener('click',onDocClick);for(const o of popovers)if(!o.pop.hidden)o.set(false)};
+  document.addEventListener('click',onDocClick);
+  const exportPop=c.querySelector('#tx-export-pop');
+  const setExportOpen=anchorPopover(c.querySelector('#tx-open-export'),exportPop,()=>c.querySelector('#export-from').focus());
+  exportPop.querySelectorAll('[data-export-preset]').forEach(b=>b.onclick=()=>{
+    const d=new Date(),ymd=x=>`${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`;
+    const k=b.dataset.exportPreset;let from,to;
+    if(k==='this'){from=new Date(d.getFullYear(),d.getMonth(),1);to=d}
+    else if(k==='last'){from=new Date(d.getFullYear(),d.getMonth()-1,1);to=new Date(d.getFullYear(),d.getMonth(),0)}
+    else{from=new Date(d);from.setDate(d.getDate()-29);to=d}
+    c.querySelector('#export-from').value=ymd(from);c.querySelector('#export-to').value=ymd(to);
   });
   c.querySelector('#tx-export-excel').addEventListener('click',async e=>{
     const button=e.currentTarget,from=c.querySelector('#export-from').value,to=c.querySelector('#export-to').value;
@@ -244,35 +283,16 @@ async function renderTransactions(c){
       if(!response.ok){const error=await response.json();throw Error(error.error||'Export failed');}
       const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');
       link.href=url;link.download='PleoExported_Data_'+from+'_to_'+to+'.xlsx';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
-      toast('Excel export downloaded');
+      toast('Excel export downloaded');setExportOpen(false);
     }catch(error){toast(error.message,true)}finally{button.disabled=false;endDataLoading();}
   });
   c.querySelector('#tx-more-toggle').addEventListener('click',e=>{
     const button=e.currentTarget,panel=c.querySelector('#tx-more-fields');panel.hidden=!panel.hidden;
     button.setAttribute('aria-expanded',String(!panel.hidden));button.innerHTML=(panel.hidden?'More filters':'Fewer filters')+' <span aria-hidden="true">'+(panel.hidden?'+':'&minus;')+'</span>';
   });
-  c.querySelector('#tx-open-removal')?.addEventListener('click',()=>{
-    const panel=c.querySelector('#tx-import-removal');
-    if(!panel){toast('Removing imported data requires an Admin account. Please sign in as an admin or ask your admin to remove the date range.',true);return;}
-    panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});c.querySelector('#remove-import-from').focus({preventScroll:true});
-  });
-  c.querySelector('#remove-import-preview')?.addEventListener('click',async()=>{
-    const result=c.querySelector('#remove-import-result'),button=c.querySelector('#remove-import-preview');
-    const dateFrom=c.querySelector('#remove-import-from').value,dateTo=c.querySelector('#remove-import-to').value;
-    button.disabled=true;result.innerHTML='';
-    try{
-      const p=await post('/api/transactions/import-removal/preview',{dateFrom,dateTo});
-      result.innerHTML='<p><b>'+fmtCount(p.removable)+' transactions can be removed</b> from '+esc(dateFrom)+' to '+esc(dateTo)+'. '+fmtCount(p.protected)+' protected records will be kept.</p>'+
-        (p.sample.length?'<p class="small">First matching transaction IDs: '+p.sample.map(t=>esc(t.id)).join(', ')+'</p>':'')+
-        (p.removable?'<button id="remove-import-confirm" class="btn btn-dark">Confirm removal of '+fmtCount(p.removable)+' transactions</button>':'');
-      c.querySelector('#remove-import-confirm')?.addEventListener('click',async e=>{
-        e.target.disabled=true;
-        try{const r=await post('/api/transactions/import-removal/confirm',{dateFrom,dateTo,token:p.token});state.selected.clear();state.filterOptions=null;state.txPage=1;toast(fmtCount(r.removed)+' imported transactions removed');await renderTransactions(c)}
-        catch(err){result.textContent=err.message+' Preview again before retrying.'}
-      });
-    }catch(e){result.textContent=e.message}finally{button.disabled=false}
-  });
-  for(const id of ['#remove-import-from','#remove-import-to'])c.querySelector(id)?.addEventListener('change',()=>{c.querySelector('#remove-import-result').innerHTML=''});
+  const removalBtn=c.querySelector('#tx-open-removal');
+  if(removalBtn&&state.user.role!=='ADMIN')removalBtn.addEventListener('click',e=>{e.stopImmediatePropagation();toast('Removing imported data requires an Admin account. Please sign in as an admin or ask your admin to remove the date range.',true)});
+  if(removalBtn){const pop=c.querySelector('#tx-removal-pop');const setRemovalOpen=anchorPopover(removalBtn,pop,()=>renderRemovalPopover(c,pop,()=>{setRemovalOpen(false);removalBtn.focus()}));}
 
   c.querySelector('#tx-show-pending').onclick=()=>{for(const k of TX_FILTER_KEYS)f[k]='';f.pleo_status='PENDING';state.txPage=1;state.selected.clear();renderTransactions(c)};
   const refresh=()=>{state.txPage=1;state.selected.clear();loadTxResults(c)};
@@ -299,13 +319,56 @@ async function renderTransactions(c){
       if(!confirm(`Assign all ${fmtCount(total)} matching transaction(s) to ${who}?${warn}`))return;
       try{const r=await post('/api/assign',{reviewer_id:rid,filter,expected_count:total});state.selected.clear();state.filterOptions=null;toast(`${fmtCount(r.assigned)} transaction(s) allocated to ${who}${r.skippedFinal?` · ${r.skippedFinal} already final, skipped`:''}`);renderTransactions(c)}catch(e){toast(e.message,true)}
     };
-    document.querySelector('#bulk-assign').onclick=async()=>{
-      const rid=chosenReviewer();if(!rid)return;if(!state.selected.size)return toast('Tick at least one transaction',true);
-      try{const r=await post('/api/assign',{reviewer_id:rid,transaction_ids:[...state.selected]});state.selected.clear();state.filterOptions=null;toast(`${fmtCount(r.assigned)} transaction(s) allocated`);renderTransactions(c)}catch(e){toast(e.message,true)}
+    const allocateSelected=async rid=>{
+      if(!rid)return toast('Choose a reviewer first',true);if(!state.selected.size)return toast('Tick at least one transaction',true);
+      const who=reviewers.find(r=>r.id===rid)?.name||'reviewer';
+      try{const r=await post('/api/assign',{reviewer_id:rid,transaction_ids:[...state.selected]});state.selected.clear();state.filterOptions=null;toast(`${fmtCount(r.assigned)} transaction(s) allocated to ${who}`);renderTransactions(c)}catch(e){toast(e.message,true)}
     };
+    document.querySelector('#bulk-assign').onclick=()=>{const rid=chosenReviewer();if(rid)allocateSelected(rid)};
+    document.querySelector('#tx-bulk-allocate').onclick=()=>allocateSelected(Number(document.querySelector('#tx-bulk-reviewer').value));
+    document.querySelector('#tx-bulk-clear').onclick=()=>{state.selected.clear();document.querySelectorAll('.tx-check').forEach(b=>{b.checked=false;b.closest('tr')?.classList.remove('is-selected')});const all=document.querySelector('#tx-check-all');if(all)all.checked=false;syncTxSelection()};
   }
   if(canSeeTeam())renderTxSync(c).catch(e=>{const el=document.querySelector('#tx-sync');if(el)el.innerHTML=`<div class="tx-sync-status"><span class="dot warn"></span>${esc(e.message)}</div>`});
   await loadTxResults(c);
+}
+// Remove imported data (header popover): choose a date range or all synced
+// data, preview what goes (assigned/reviewed rows are protected), then confirm
+// with the preview's token. Rebuilt fresh every time the popover opens.
+function renderRemovalPopover(c,pop,close){
+  pop.innerHTML=`<div class="tx-pop-head"><b>Remove imported data</b><span>Unassigned, unreviewed synced transactions only — anything assigned, reviewed or classified is kept. Pleo is unchanged; syncing again can bring them back.</span></div>
+      <div class="seg tx-removal-mode" role="radiogroup" aria-label="What to remove"><button type="button" role="radio" aria-checked="true" class="on" data-mode="range">Date range</button><button type="button" role="radio" aria-checked="false" data-mode="all">All synced data</button></div>
+      <div class="tx-pop-dates" data-range-fields><label><span>From</span><input id="remove-import-from" type="date"></label><label><span>To</span><input id="remove-import-to" type="date"></label></div>
+      <p class="small muted" data-range-fields>Uses transaction dates, not the date you ran the sync.</p>
+      <div id="remove-import-result" class="tx-removal-result" aria-live="polite"></div>
+      <div class="tx-removal-actions"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button type="button" id="remove-import-preview" class="btn btn-soft">Preview removal</button></div>`;
+  const m=pop,result=m.querySelector('#remove-import-result'),previewBtn=m.querySelector('#remove-import-preview');
+  let mode='range';
+  m.querySelector('[data-close]').onclick=close;
+  const reset=()=>{result.innerHTML='';previewBtn.hidden=false};
+  m.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{
+    mode=b.dataset.mode;m.querySelectorAll('[data-mode]').forEach(x=>{x.classList.toggle('on',x===b);x.setAttribute('aria-checked',String(x===b))});
+    m.querySelectorAll('[data-range-fields]').forEach(x=>x.hidden=mode==='all');reset();
+  });
+  m.querySelectorAll('input[type=date]').forEach(i=>i.addEventListener('change',reset));
+  previewBtn.onclick=async()=>{
+    const all=mode==='all',dateFrom=all?null:m.querySelector('#remove-import-from').value,dateTo=all?null:m.querySelector('#remove-import-to').value;
+    if(!all&&(!dateFrom||!dateTo||dateFrom>dateTo)){result.innerHTML='<div class="tx-removal-note warn">Choose a valid From and To date, in order.</div>';return}
+    previewBtn.disabled=true;result.innerHTML='';
+    try{
+      const p=await post('/api/transactions/import-removal/preview',all?{all:true}:{dateFrom,dateTo});
+      result.innerHTML=`<div class="tx-removal-summary"><div><strong>${fmtCount(p.removable)}</strong><span>will be removed</span></div><div><strong>${fmtCount(p.protected)}</strong><span>protected, kept</span></div></div>
+        <p class="small muted">${all?'Across <b>all synced data</b>.':`From ${esc(fmtDate(dateFrom))} to ${esc(fmtDate(dateTo))}.`}${p.sample.length?` First IDs: ${p.sample.map(t=>esc(t.id)).join(', ')}`:''}</p>`;
+      if(!p.removable){result.insertAdjacentHTML('beforeend','<div class="tx-removal-note">Nothing to remove here.</div>');return}
+      previewBtn.hidden=true;
+      result.insertAdjacentHTML('beforeend',`<button type="button" id="remove-import-confirm" class="btn btn-danger tx-removal-confirm">Remove ${fmtCount(p.removable)} transaction${p.removable===1?'':'s'}</button>`);
+      m.querySelector('#remove-import-confirm').onclick=async e=>{
+        e.target.disabled=true;e.target.textContent='Removing…';
+        try{const r=await post('/api/transactions/import-removal/confirm',all?{all:true,token:p.token}:{dateFrom,dateTo,token:p.token});close();state.selected.clear();state.filterOptions=null;state.txPage=1;toast(fmtCount(r.removed)+' imported transactions removed');await renderTransactions(c)}
+        catch(err){result.innerHTML=`<div class="tx-removal-note warn">${esc(err.message)} Preview again before retrying.</div>`;previewBtn.hidden=false}
+      };
+    }catch(e){result.innerHTML=`<div class="tx-removal-note warn">${esc(e.message)}</div>`}finally{previewBtn.disabled=false}
+  };
+  m.querySelector('#remove-import-from').focus();
 }
 // Daily Pleo sync bar. Admins/team leads can switch the daily run on, pick
 // the time and run it on demand; Finance QC sees the status read-only.
@@ -388,7 +451,7 @@ async function loadTxResults(c){
   const out=document.querySelector('#tx-results');if(!out)return;
   const seq=++txLoadSeq,f=state.filters,manage=canManage();
   const q=new URLSearchParams();for(const k of TX_FILTER_KEYS)if(f[k])q.set(k,f[k]);
-  q.set('limit',state.txPageSize);q.set('offset',(state.txPage-1)*state.txPageSize);
+  q.set('limit',state.txPageSize);q.set('offset',(state.txPage-1)*state.txPageSize);q.set('sort',state.txSort);q.set('dir',state.txDir);
   out.classList.add('is-loading');if(!out.innerHTML)out.innerHTML=loadingMarkup();
   let p;
   try{p=await api('/api/transactions?'+q)}catch(e){if(seq===txLoadSeq){out.classList.remove('is-loading');out.innerHTML=`<div class="error-box">${esc(e.message)}</div>`}return}
@@ -410,21 +473,81 @@ async function loadTxResults(c){
     const all=document.querySelector('#bulk-assign-all');all.disabled=!p.total;all.textContent=`Assign all ${fmtCount(p.total)} matching`;
   }
   out.classList.remove('is-loading');
-  out.innerHTML=`<div class="panel"><div class="panel-head"><h3>Showing ${fmtCount(pageStart)}–${fmtCount(pageEnd)} of ${fmtCount(p.total)}</h3><div class="seg" role="group" aria-label="Table layout"><button type="button" data-view="excel" class="${state.txView==='excel'?'on':''}">Excel view</button><button type="button" data-view="compact" class="${state.txView==='compact'?'on':''}">Compact</button></div></div>${renderTxTable(rows)}<div class="tx-pager"><select id="tx-pagesize" aria-label="Rows per page">${[25,50,100].map(n=>`<option value="${n}" ${state.txPageSize===n?'selected':''}>${n} per page</option>`).join('')}</select><div class="tx-pager-nav"><button id="tx-prev" class="btn btn-ghost" ${p.page<=1?'disabled':''}>← Previous</button><span class="small muted">Page ${fmtCount(p.page)} of ${fmtCount(p.totalPages)}</span><button id="tx-next" class="btn btn-ghost" ${p.page>=p.totalPages?'disabled':''}>Next →</button></div></div></div>`;
+  renderTxInsights(c,p);
+  // Counts come from the server; if they're missing (e.g. an older server
+  // still running) show no number rather than a misleading 0. With no status
+  // filter, All is simply the matching total.
+  const sc=p.statusCounts,allCount=sc?Object.values(sc).reduce((a,b)=>a+Number(b||0),0):f.status?null:p.total;
+  const tabs=[['','All',allCount],...TX_STATUSES.map(v=>[v,sentenceCase(v),sc?Number(sc[v]||0):null])];
+  const pageBtns=txPageList(p.page,p.totalPages).map(n=>n==='…'?'<span class="tx-page-gap">…</span>':`<button type="button" class="tx-page${n===p.page?' on':''}" data-page="${n}" ${n===p.page?'aria-current="page"':''}>${fmtCount(n)}</button>`).join('');
+  out.innerHTML=`<div class="panel tx-panel">
+    <div class="tx-status-tabs" role="tablist" aria-label="Filter by JSAN status">${tabs.map(([v,l,n])=>`<button type="button" role="tab" aria-selected="${f.status===v}" class="tx-status-tab${f.status===v?' on':''}" data-status-tab="${v}">${v?`<span class="tx-tab-dot s-${v}"></span>`:''}${esc(l)}${n==null?"":`<b>${fmtCount(n)}</b>`}</button>`).join('')}</div>
+    <div class="panel-head tx-panel-head"><h3>Showing ${fmtCount(pageStart)}–${fmtCount(pageEnd)} <span class="muted">of ${fmtCount(p.total)}</span></h3>
+      <div class="tx-view-tools"><button type="button" id="tx-density" class="tx-icon-btn${state.txDense?' on':''}" aria-pressed="${state.txDense}" title="Tighter rows, more on screen">Dense rows</button><div class="seg" role="group" aria-label="Table layout"><button type="button" data-view="excel" class="${state.txView==='excel'?'on':''}">Excel view</button><button type="button" data-view="compact" class="${state.txView==='compact'?'on':''}">Compact</button></div></div></div>
+    ${renderTxTable(rows)}
+    <div class="tx-pager"><select id="tx-pagesize" aria-label="Rows per page">${[25,50,100,200].map(n=>`<option value="${n}" ${state.txPageSize===n?'selected':''}>${n} per page</option>`).join('')}</select>
+      <nav class="tx-pager-nav" aria-label="Pages"><button type="button" class="tx-page" data-page="${p.page-1}" ${p.page<=1?'disabled':''} aria-label="Previous page">‹</button>${pageBtns}<button type="button" class="tx-page" data-page="${p.page+1}" ${p.page>=p.totalPages?'disabled':''} aria-label="Next page">›</button></nav>
+      <span class="tx-kbd-hint small muted"><kbd>/</kbd> search · <kbd>Shift</kbd>+click select a range · <kbd>Esc</kbd> clear selection</span></div></div>`;
 
+  const clearAll=()=>{for(const k of TX_FILTER_KEYS)f[k]='';state.txPage=1;state.selected.clear();renderTransactions(c)};
   document.querySelectorAll('#tx-chips [data-clear]').forEach(b=>b.onclick=()=>{const k=b.dataset.clear;f[k]='';state.txPage=1;state.selected.clear();renderTransactions(c)});
-  document.querySelector('#tx-reset')?.addEventListener('click',()=>{for(const k of TX_FILTER_KEYS)f[k]='';state.txPage=1;state.selected.clear();renderTransactions(c)});
-  const selCount=()=>{const el=document.querySelector('#tx-sel-count');if(el)el.textContent=fmtCount(state.selected.size)};
-  document.querySelectorAll('.tx-check').forEach(x=>x.onclick=e=>{e.stopPropagation();const id=Number(x.dataset.id);x.checked?state.selected.add(id):state.selected.delete(id);selCount()});
+  document.querySelector('#tx-reset')?.addEventListener('click',clearAll);
+  out.querySelector('[data-reset-filters]')?.addEventListener('click',clearAll);
+  out.querySelectorAll('[data-status-tab]').forEach(b=>b.onclick=()=>{f.status=b.dataset.statusTab;const sel=document.querySelector('#tx-status');if(sel)sel.value=f.status;state.txPage=1;state.selected.clear();loadTxResults(c)});
+  out.querySelectorAll('[data-sort]').forEach(b=>b.onclick=()=>{const k=b.dataset.sort;if(state.txSort===k)state.txDir=state.txDir==='asc'?'desc':'asc';else{state.txSort=k;state.txDir=['date','amount','receipts'].includes(k)?'desc':'asc'}state.txPage=1;loadTxResults(c)});
+  const boxes=[...document.querySelectorAll('.tx-check')];let lastIdx=null;
+  const setBox=(b,on)=>{b.checked=on;const id=Number(b.dataset.id);on?state.selected.add(id):state.selected.delete(id);b.closest('tr').classList.toggle('is-selected',on)};
+  // Shift-click ticks (or unticks) the whole run from the last box clicked.
+  boxes.forEach((x,i)=>x.onclick=e=>{e.stopPropagation();if(e.shiftKey&&lastIdx!=null){const a=Math.min(lastIdx,i),b=Math.max(lastIdx,i);for(let j=a;j<=b;j++)setBox(boxes[j],x.checked)}else setBox(x,x.checked);lastIdx=i;syncTxSelection()});
   const checkAll=document.querySelector('#tx-check-all');
-  if(checkAll){const boxes=[...document.querySelectorAll('.tx-check')];checkAll.checked=boxes.length>0&&boxes.every(b=>b.checked);
-    checkAll.onclick=e=>{e.stopPropagation();for(const b of boxes){b.checked=checkAll.checked;const id=Number(b.dataset.id);checkAll.checked?state.selected.add(id):state.selected.delete(id)}selCount()}}
-  document.querySelectorAll('[data-open]').forEach(tr=>tr.onclick=e=>{if(e.target.classList.contains('tx-check'))return;openTransaction(Number(tr.dataset.open))});
-  document.querySelectorAll('.seg [data-view]').forEach(b=>b.onclick=()=>{state.txView=b.dataset.view;try{localStorage.setItem('spendops.txView',state.txView)}catch{}loadTxResults(c)});
+  if(checkAll){checkAll.checked=boxes.length>0&&boxes.every(b=>b.checked);checkAll.onclick=e=>{e.stopPropagation();for(const b of boxes)setBox(b,checkAll.checked);syncTxSelection()}}
+  syncTxSelection();
+  document.querySelectorAll('[data-open]').forEach(tr=>{
+    tr.onclick=e=>{if(e.target.closest('.tx-check-col'))return;openTransaction(Number(tr.dataset.open))};
+    tr.onkeydown=e=>{if(e.key==='Enter'&&e.target===tr)openTransaction(Number(tr.dataset.open))};
+  });
+  out.querySelectorAll('.seg [data-view]').forEach(b=>b.onclick=()=>{state.txView=b.dataset.view;try{localStorage.setItem('spendops.txView',state.txView)}catch{}loadTxResults(c)});
+  out.querySelector('#tx-density').onclick=()=>{state.txDense=!state.txDense;try{localStorage.setItem('spendops.txDense',state.txDense?'1':'0')}catch{}loadTxResults(c)};
   document.querySelector('#tx-pagesize').onchange=e=>{state.txPageSize=Number(e.target.value);state.txPage=1;loadTxResults(c)};
-  document.querySelector('#tx-prev').onclick=()=>{if(state.txPage>1){state.txPage--;loadTxResults(c)}};
-  document.querySelector('#tx-next').onclick=()=>{if(state.txPage<p.totalPages){state.txPage++;loadTxResults(c)}};
+  out.querySelectorAll('.tx-pager [data-page]').forEach(b=>b.onclick=()=>{const n=Number(b.dataset.page);if(n>=1&&n<=p.totalPages&&n!==p.page){state.txPage=n;loadTxResults(c);out.scrollIntoView({behavior:'smooth',block:'start'})}});
 }
+// 1 … 4 5 [6] 7 8 … 20
+function txPageList(page,total){
+  const set=new Set([1,total,page-2,page-1,page,page+1,page+2].filter(n=>n>=1&&n<=total));
+  const out=[];let prev=0;for(const n of [...set].sort((a,b)=>a-b)){if(n-prev>1)out.push('…');out.push(n);prev=n}return out;
+}
+// Selected-count readouts + the floating bulk bar, kept in step with state.selected.
+function syncTxSelection(){
+  const n=state.selected.size,el=document.querySelector('#tx-sel-count');if(el)el.textContent=fmtCount(n);
+  const bar=document.querySelector('#tx-bulkbar');if(!bar)return;bar.hidden=!n;document.querySelector('#tx-bulk-count').textContent=fmtCount(n);
+}
+// At-a-glance numbers for everything matching the filters (not just this page).
+// Cards that point at a gap are clickable and apply that filter.
+function renderTxInsights(c,p){
+  const el=c.querySelector('#tx-insights');if(!el)return;
+  const sc=p.statusCounts||{},f=state.filters,total=Object.values(sc).reduce((a,b)=>a+b,0);
+  const done=(sc.APPROVED||0)+(sc.REJECTED||0),waiting=(sc.UNASSIGNED||0)+(sc.ASSIGNED||0)+(sc.IN_REVIEW||0);
+  const pct=total?Math.round(done/total*100):0,[top,...rest]=p.totals||[];
+  const card=(label,value,sub,{filter,tone='',extra=''}={})=>{
+    const tag=filter?'button':'div',attrs=filter?` type="button" data-kpi-filter="${esc(JSON.stringify(filter))}" title="Show these transactions"`:'';
+    return `<${tag} class="tx-kpi${tone?' tone-'+tone:''}${filter?' is-action':''}"${attrs}><span class="tx-kpi-label">${label}</span><strong>${value}</strong><span class="tx-kpi-sub">${sub}</span>${extra}</${tag}>`;
+  };
+  el.innerHTML=
+    card('Billed spending',top?esc(fmtMoney(top.amount,top.currency)):'—',`${fmtCount(top?.n||0)} posted expenses${rest.length?` · <span title="${esc(rest.map(r=>fmtMoney(r.amount,r.currency)).join(' · '))}">+${rest.length} other currenc${rest.length===1?'y':'ies'}</span>`:''}${p.unbilled?` · <span title="Pending or not yet billed by Pleo — not counted, same as Expense Intelligence">${fmtCount(p.unbilled)} not billed yet</span>`:''}`,{tone:'primary'})+
+    card('Review progress',`${pct}%`,`${fmtCount(sc.APPROVED||0)} approved · ${fmtCount(sc.REJECTED||0)} rejected`,{extra:`<span class="tx-kpi-bar" aria-hidden="true"><i style="width:${pct}%"></i></span>`})+
+    card('Awaiting review',fmtCount(waiting),`${fmtCount(sc.UNASSIGNED||0)} not yet allocated`,{filter:{status:'UNASSIGNED'},tone:waiting?'info':''})+
+    card('Needs info',fmtCount(sc.NEEDS_INFO||0),'Waiting on the employee',{filter:{status:'NEEDS_INFO'},tone:sc.NEEDS_INFO?'warn':''})+
+    card('Missing evidence',fmtCount(p.evidenceCounts?.missing||0),'No receipt from Pleo',{filter:{receipt_status:'missing'},tone:p.evidenceCounts?.missing?'warn':''})+
+    card('No project',fmtCount(p.gaps?.noProject||0),'Not linked to a project',{filter:{project_status:'MISSING_PROJECT',project:''},tone:p.gaps?.noProject?'bad':''});
+  el.querySelectorAll('[data-kpi-filter]').forEach(b=>b.onclick=()=>{Object.assign(f,JSON.parse(b.dataset.kpiFilter));state.txPage=1;state.selected.clear();renderTransactions(c)});
+}
+// "/" jumps to search and Esc clears the selection while on Transactions.
+document.addEventListener('keydown',e=>{
+  if(state.page!=='transactions'||e.ctrlKey||e.metaKey||e.altKey||document.querySelector('#tx-modal'))return;
+  const typing=/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)||document.activeElement?.isContentEditable;
+  if(e.key==='/'&&!typing){const s=document.querySelector('#tx-search');if(s){e.preventDefault();s.focus();s.select()}}
+  else if(e.key==='Escape'&&!typing&&state.selected.size)document.querySelector('#tx-bulk-clear')?.click();
+});
 async function openTransaction(id){const p=await api(`/api/transactions/${id}`);state.modal=p;const tx=p.tx;const active=p.sessions.find(s=>!s.ended_at&&s.user_id===state.user.id);const canWork=tx.reviewer_id===state.user.id||canSeeTeam();const final=['APPROVED','REJECTED'].includes(tx.status);const projects=state.bootstrap.projects||[];document.body.insertAdjacentHTML('beforeend',`<div id="tx-modal" class="modal-wrap"><div class="modal"><div class="modal-head"><div><div class="kicker">Pleo ${esc(tx.source_mode)}</div><h3>${esc(tx.pleo_reconciliation_id||tx.pleo_accounting_entry_id)}</h3></div><button id="modal-close" class="close">×</button></div><div class="modal-body"><div class="workbench"><section><div class="tx-title"><div><h2>${esc(tx.merchant||'Expense')}</h2><div class="muted">${esc(tx.employee_name||tx.employee_id||'Unknown employee')} · ${esc(fmtDate(tx.transaction_date))}</div></div><div class="amount-big">${transactionAmount(tx)}</div></div><div class="meta-grid"><div class="meta"><span>Status</span><b><span class="status s-${tx.status}">${tx.status.replaceAll('_',' ')}</span></b></div><div class="meta"><span>Reviewer</span><b>${esc(tx.reviewer_name||'Unallocated')}</b></div><div class="meta"><span>Category</span><b>${esc(tx.resolved_category_name||tx.category||'—')}</b></div><div class="meta"><span>Pleo transaction status</span><b>${pleoStatusChip(tx)}</b></div><div class="meta"><span>Type</span><b>${esc(tx.expense_type||'—')}</b></div><div class="meta"><span>Tags</span><b>${esc(tx.tags||'—')}</b></div><div class="meta"><span>Pleo review</span><b>${esc(tx.pleo_review_status_label||tx.pleo_review_status||'—')}</b></div><div class="meta"><span>Project</span><b>${esc(tx.project_code?(tx.project_code===tx.attributed_project_code?tx.attributed_project_name:tx.project_code):(tx.attributed_project_name||tx.team_name||(tx.project_status==='PROJECT_ATTRIBUTION_CONFLICT'?'Conflicting project evidence':'Not set')))}</b></div></div><div class="panel"><div class="panel-head"><h3>Receipt evidence</h3><span class="small muted">${(p.receipts||[]).length} file(s) · loaded live from Pleo</span></div><div class="panel-body">${(p.receipts||[]).length?`<div class="receipt-grid">${p.receipts.map(r=>`<a class="receipt-card${r.error?' is-doc':''}" target="_blank" rel="noopener" href="${esc(r.url)}" title="Open ${esc(r.label)} in a new tab"><span class="receipt-thumb"><span class="receipt-wait">Loading from Pleo…</span>${r.error?'':`<img src="${esc(r.url)}" alt="${esc(r.label)}" loading="lazy" onerror="this.closest('.receipt-card').classList.add('is-doc')">`}<span class="receipt-doc"><b>PDF / document</b><span>Click to open</span></span></span><span class="receipt-meta"><b>${esc(r.label)}</b><span>${r.error?esc('Unavailable'):'Open ↗'}</span></span></a>`).join('')}</div>`:'<div class="muted small">Pleo has no receipt attached to this expense.</div>'}</div></div>${tx.note?`<div class="notice" style="margin-top:14px"><b>Pleo note:</b> ${esc(tx.note)}</div>`:''}${tx.pleo_reviewer_names||tx.pleo_review_note?`<div class="notice" style="margin-top:14px"><b>Pleo review history:</b> ${esc(tx.pleo_review_status_label||'')}${tx.pleo_reviewer_names?` · ${esc(tx.pleo_reviewer_names)}`:''}${tx.pleo_review_note?`<div style="margin-top:6px">${esc(tx.pleo_review_note)}</div>`:''}</div>`:''}<div class="divider"></div><div><div class="kicker">Audit trail</div><div class="audit-list" style="margin-top:10px">${p.audit.length?p.audit.slice(0,15).map(a=>`<div class="audit-entry"><b>${esc(a.action.replaceAll('_',' '))}</b> · ${esc(a.actor_name||'System')} · ${esc(fmtDate(a.created_at))}${a.action==='DECISION_REOPENED'?(()=>{try{const d=typeof a.detail==='string'?JSON.parse(a.detail):a.detail;return d?.reason?`<div class="small muted">Was ${esc(sentenceCase(d.previous_status||''))} · Reason: ${esc(d.reason)}</div>`:''}catch{return ''}})():''}</div>`).join(''):'<div class="muted small">No JSAN actions yet.</div>'}</div></div></section><aside><div class="timer-card"><div class="timer-row"><div><div class="kicker">Active validation</div><div id="timer" class="timer">00:00</div></div><span class="status ${active?'s-IN_REVIEW':'s-UNASSIGNED'}">${active?'RUNNING':'PAUSED'}</span></div><p>Time is heartbeat-verified and auto-pauses after ${Math.max(1,Math.round((state.bootstrap?.config?.idleTimeoutSeconds||150)/60))} minutes without heartbeat activity.</p><div class="timer-actions"><button id="start-work" class="btn btn-primary" ${!canWork||final||active?'disabled':''}>Start validation</button><button id="pause-work" class="btn btn-ghost" style="color:white;border-color:#31505d" ${!active?'disabled':''}>Pause</button></div></div><div class="panel"><div class="panel-head"><h3>JSAN validation</h3></div><div class="panel-body"><div class="form-grid"><div class="field"><label>Commercial classification</label><select id="classification" ${final?'disabled':''}><option value="">Select classification</option>${[...COMMERCIAL_OPTIONS,...(tx.commercial_classification&&!COMMERCIAL_OPTIONS.includes(tx.commercial_classification)?[tx.commercial_classification]:[])].map(v=>`<option value="${v}" ${tx.commercial_classification===v?'selected':''} ${COMMERCIAL_OPTIONS.includes(v)?'':'disabled'}>${esc(COMMERCIAL_LABELS[v]||sentenceCase(v))}</option>`).join('')}</select></div><div class="field"><label>Project</label><select id="project" ${final?'disabled':''}><option value="">Select project</option>${projects.map(v=>`<option value="${v.code}" ${(tx.project_code||tx.attributed_project_code)===v.code?'selected':''}>${esc(v.name)}</option>`).join('')}</select></div><div class="field"><label>Reviewer notes</label><textarea id="review-notes" ${final?'disabled':''} placeholder="Reason, policy exception, clarification required…">${esc(tx.reviewer_notes||'')}</textarea></div>${final?`<div class="notice final-decision"><div><b>Final decision:</b> ${esc(sentenceCase(tx.decision||tx.status))}${tx.completed_at?` · ${esc(fmtDate(tx.completed_at))}`:''}</div>${tx.reviewer_id===state.user.id||canSeeTeam()?'<button id="reopen-tx" type="button" class="btn btn-soft">Edit &amp; re-check</button>':''}</div>`:`<div class="decision-row"><button data-decision="APPROVED" class="btn btn-primary">Approve</button><button data-decision="NEEDS_INFO" class="btn btn-soft">Need info</button><button data-decision="REJECTED" class="btn btn-danger">Reject</button></div>`}</div></div></div></aside></div></div></div></div>`);document.querySelector('#modal-close').onclick=()=>closeModal(true);if(active)startLocalTimer(tx.id,active.started_at);document.querySelector('#start-work')?.addEventListener('click',async()=>{try{const r=await post(`/api/transactions/${tx.id}/start`);toast('Validation started');startLocalTimer(tx.id,r.startedAt);document.querySelector('#start-work').disabled=true;document.querySelector('#pause-work').disabled=false}catch(e){toast(e.message,true)}});document.querySelector('#pause-work')?.addEventListener('click',async()=>{try{await pauseCurrent();toast('Validation paused');document.querySelector('#start-work').disabled=false;document.querySelector('#pause-work').disabled=true}catch(e){toast(e.message,true)}});document.querySelectorAll('[data-decision]').forEach(b=>b.onclick=async()=>{const decision=b.dataset.decision;try{const payload={decision,commercial_classification:document.querySelector('#classification').value||null,project_code:document.querySelector('#project').value||null,notes:document.querySelector('#review-notes').value};const r=await post(`/api/transactions/${tx.id}/review`,payload);stopLocalTimer();toast(`${decision.replace('_',' ')} · ${fmtTime(r.reviewSeconds)} active time`);document.querySelector('#tx-modal')?.remove();state.modal=null;await renderPage()}catch(e){toast(e.message,true)}})}
 const renderTransactionExtraFields=openTransaction;
 openTransaction=async function(id){await renderTransactionExtraFields(id);const tx=state.modal?.tx;if(!tx)return;const notesField=document.querySelector('#review-notes')?.closest('.field');if(!notesField)return;const final=['APPROVED','REJECTED'].includes(tx.status);if(!tx.manual_category_name&&!tx.resolved_category_name&&!tx.category)notesField.insertAdjacentHTML('beforebegin',`<div class="field"><label for="manual-category">Category</label><select id="manual-category" ${final?'disabled':''}><option value="">Select a category</option>${(state.modal.categoryOptions||[]).map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('')}</select></div>`);notesField.insertAdjacentHTML('beforebegin',`<div class="field"><label for="xpense-id">Xpense ID</label><textarea id="xpense-id" maxlength="500" placeholder="Enter Xpense ID" ${final?'disabled':''}>${esc(tx.xpense_id||'')}</textarea></div>`)};
@@ -575,9 +698,9 @@ async function renderExpense(c){
       const sum=(items,key)=>items.reduce((n,x)=>n+Math.round(x[key]*100),0)/100;
       const totalRow=(label,items)=>'<tr class="expense-current-month"><td><b>'+esc(label)+'</b></td>'+fields.map(([key])=>'<td class="money"><b>'+esc(money(sum(items,key)))+'</b></td>').join('')+'<td class="money">'+esc(money(sum(items,'unclassified')))+'</td></tr>';
       target.innerHTML='<div class="expense-section-intro"><h3>Commercial classification</h3><label>Project<select id="expense-project"><option value="">All projects</option>'+[...names].map(([key,label])=>'<option value="'+esc(key)+'" '+(key===project?'selected':'')+'>'+esc(label)+'</option>').join('')+'</select></label></div>'+
-        '<p class="expense-balance-note">Based on the Commercial classification saved in Transactions, for posted wallet expenses in the selected month and billing currency. Refund credits are positive recoveries; reversals reduce their totals. Salary deductions use the recorded amount converted at the transaction?s billed exchange ratio; the remaining cost is included in JSAN internal cost. Pending, deleted, wallet loads, out-of-pocket and bill-invoice records are excluded.</p>'+
-        '<h3>All projects totals</h3><div class="expense-commercial-grid">'+fields.map(([key,label])=>card(label,sum(rows,key),'All projects ? '+esc(monthLabel(month)))).join('')+'</div>'+
-        panel((project?names.get(project):'All projects')+' ? '+monthLabel(month),table(['Project',...fields.map(x=>x[1]),'Unclassified / other'],[
+        '<p class="expense-balance-note">Based on the Commercial classification saved in Transactions, for posted wallet expenses in the selected month and billing currency. Refund credits are positive recoveries; reversals reduce their totals. Salary deductions use the recorded amount converted at the transaction’s billed exchange ratio; the remaining cost is included in JSAN internal cost. Pending, deleted, wallet loads, out-of-pocket and bill-invoice records are excluded.</p>'+
+        '<h3>All projects totals</h3><div class="expense-commercial-grid">'+fields.map(([key,label])=>card(label,sum(rows,key),'All projects · '+esc(monthLabel(month)))).join('')+'</div>'+
+        panel((project?names.get(project):'All projects')+' · '+monthLabel(month),table(['Project',...fields.map(x=>x[1]),'Unclassified / other'],[
           ...selected.map(x=>'<tr><td><b>'+esc(names.get(projectKey(x)))+'</b></td>'+fields.map(([key])=>'<td class="money">'+esc(money(x[key]))+'</td>').join('')+'<td class="money">'+esc(money(x.unclassified))+'</td></tr>'),
           ...(selected.length?[totalRow(project?'Selected project total':'All projects total',selected)]:[])
         ]))+

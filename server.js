@@ -1599,7 +1599,12 @@ function startSyncPleoHistorical(dateFrom,dateTo,triggerType,userId){
 }
 // Pending entries have no final billed value yet. Refresh them independently
 // of settlement windows so they remain visible in Transactions.
-async function syncPendingEntries(runId,employeeMap,categoryMap){
+// range (optional {startMs,endMs}): with an explicit Sync-now date range, new
+// pending entries are only added when their purchase date falls inside it —
+// otherwise every currently pending Pleo entry (i.e. the last day or so) was
+// imported whatever range was chosen. Already-stored pending rows are still
+// refreshed regardless, so nothing stays stuck in PENDING.
+async function syncPendingEntries(runId,employeeMap,categoryMap,range=null){
   let inserted=0,updated=0,itemsSeen=0,att=0;
   const previous=new Map(db.prepare("SELECT t.pleo_accounting_entry_id,t.transaction_date,r.raw_json FROM transactions t LEFT JOIN pleo_raw_entries r ON r.accounting_entry_id=t.pleo_accounting_entry_id WHERE t.pleo_status='PENDING'").all().map(r=>[r.pleo_accounting_entry_id,r]));
   const ingest=item=>{
@@ -1628,6 +1633,10 @@ async function syncPendingEntries(runId,employeeMap,categoryMap){
   };
   await scan({includeDeleted:false,status:['PENDING']},item=>{
     if(item.status!=='PENDING')return;
+    if(range&&!previous.has(item.id)){
+      const whenMs=Date.parse(item.performedAt||item.settledAt||'');
+      if(!Number.isFinite(whenMs)||whenMs<range.startMs||whenMs>range.endMs)return;
+    }
     previous.delete(item.id);ingest(item);
   });
   // A record disappearing from the pending feed may have settled or been
@@ -1700,7 +1709,7 @@ async function syncPleo(runId, triggerType='manual', userId=null, opts={}) {
       }
       if(!complete)throw new Error('Live sync exceeded its page limit; range is incomplete');
       // A failed/partial run may safely upsert again, but must never skip pages.
-      const pending=await syncPendingEntries(runId,employeeMap,categoryMap);
+      const pending=await syncPendingEntries(runId,employeeMap,categoryMap,Number.isFinite(fromMs)?{startMs,endMs:endDate.getTime()}:null);
       inserted+=pending.inserted;updated+=pending.updated;itemsSeen+=pending.itemsSeen;att+=pending.att;
       // Advance "synced up to" only when this run joined on to the previous
       // one without a gap and reached further; a custom past range or a
@@ -1848,15 +1857,46 @@ function transactionList(user,url){
   const limit=Math.min(500,Math.max(1,Number(url.searchParams.get('limit')||200)));
   const offset=Math.max(0,Number(url.searchParams.get('offset')||0));
   const total=db.prepare(`SELECT COUNT(*) c FROM transactions t ${whereSql}`).get(...args).c;
-  const rows=db.prepare(`SELECT t.*,u.name reviewer_name,${EFFECTIVE_PROJECT_SQL} effective_project_code FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql} ORDER BY COALESCE(t.transaction_date,t.created_at) DESC,t.id DESC LIMIT ? OFFSET ?`).all(...args,limit,offset);
+  const sortKey=TX_SORTS[url.searchParams.get('sort')]?url.searchParams.get('sort'):'date';
+  const dir=url.searchParams.get('dir')==='asc'?'ASC':'DESC';
+  const rows=db.prepare(`SELECT t.*,u.name reviewer_name,${EFFECTIVE_PROJECT_SQL} effective_project_code FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql} ORDER BY ${TX_SORTS[sortKey]} ${dir},t.id ${dir} LIMIT ? OFFSET ?`).all(...args,limit,offset);
   const names=new Map(db.prepare('SELECT code,name FROM projects').all().map(p=>[p.code,p.name]));
   for(const r of rows) r.effective_project_name=r.effective_project_code?(names.get(r.effective_project_code)||r.effective_project_code):null;
   const pendingTotal=user.role==='REVIEWER'?db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING' AND reviewer_id=?").get(user.id).n:db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING'").get().n;
   const evidenceParams=new URLSearchParams(url.searchParams);evidenceParams.delete('receipt_status');
   const evidenceWhere=transactionWhere(user,evidenceParams);
   const evidenceCounts=db.prepare(`SELECT COUNT(*) total,COALESCE(SUM(t.receipt_count>0),0) present,COALESCE(SUM(t.receipt_count=0),0) missing FROM transactions t ${evidenceWhere.whereSql}`).get(...evidenceWhere.args);
-  return {rows,total,pendingTotal,evidenceCounts,limit,offset,page:Math.floor(offset/limit)+1,totalPages:Math.max(1,Math.ceil(total/limit))};
+  // Status tab counts ignore the status filter itself, so every tab shows
+  // what it would contain with the other filters kept.
+  const statusParams=new URLSearchParams(url.searchParams);statusParams.delete('status');
+  const statusWhere=transactionWhere(user,statusParams);
+  const statusCounts=Object.fromEntries(db.prepare(`SELECT t.status,COUNT(*) n FROM transactions t ${statusWhere.whereSql} GROUP BY t.status`).all(...statusWhere.args).map(r=>[r.status,r.n]));
+  // Billed spending of the matching set, by the same rules as Expense
+  // Intelligence (lib/expense-summary.mjs): Pleo billed amount, sign flipped so
+  // spending is positive and refunds/cashback reduce it; pending, unbilled,
+  // deleted, demo, wallet loads, out-of-pocket and bill-invoice rows excluded.
+  // So a month filter here shows the same figure as that month's Total spending.
+  const spendWhere=`${whereSql?whereSql+' AND':'WHERE'} ${TX_SPENDING_SQL}`;
+  const totals=db.prepare(`SELECT t.bill_currency currency,COUNT(*) n,COALESCE(SUM(-t.bill_amount),0) amount FROM transactions t ${spendWhere} GROUP BY 1 ORDER BY n DESC`).all(...args);
+  const unbilled=db.prepare(`SELECT COUNT(*) n FROM transactions t ${whereSql?whereSql+' AND':'WHERE'} COALESCE(t.pleo_status,'')<>'DELETED' AND (t.pleo_status='PENDING' OR t.bill_currency IS NULL OR t.bill_amount IS NULL)`).get(...args).n;
+  const gaps=db.prepare(`SELECT COALESCE(SUM(t.project_status='MISSING_PROJECT'),0) noProject,COALESCE(SUM(t.commercial_classification IS NULL),0) unclassified FROM transactions t ${whereSql}`).get(...args);
+  return {rows,total,pendingTotal,evidenceCounts,statusCounts,totals,unbilled,gaps,sort:sortKey,dir:dir.toLowerCase(),limit,offset,page:Math.floor(offset/limit)+1,totalPages:Math.max(1,Math.ceil(total/limit))};
 }
+// Which rows count as spending — must stay in step with summarizeExpenses().
+const TX_SPENDING_SQL="COALESCE(t.pleo_status,'') NOT IN ('DELETED','PENDING') AND t.bill_currency IS NOT NULL AND t.bill_amount IS NOT NULL AND COALESCE(t.pleo_family,'') NOT IN ('WALLET','OUT_OF_POCKET','BILL_INVOICE') AND COALESCE(t.source_system,'')<>'DEMO' AND COALESCE(t.source_environment,'')<>'MOCK' AND COALESCE(t.source_kind,'')<>'DEMO'";
+// Column sorts the Transactions table offers — keys map to fixed SQL, never
+// to user input, so the ORDER BY can't be injected.
+const TX_SORTS={
+  date:'COALESCE(t.transaction_date,t.created_at)',
+  amount:'COALESCE(t.bill_amount,t.amount)',
+  merchant:"LOWER(COALESCE(t.merchant,''))",
+  employee:"LOWER(COALESCE(t.employee_name,''))",
+  status:'t.status',
+  project:`LOWER(COALESCE(${EFFECTIVE_PROJECT_SQL},t.team_name,''))`,
+  category:"LOWER(COALESCE(t.resolved_category_name,t.category,''))",
+  reviewer:"LOWER(COALESCE(u.name,''))",
+  receipts:'t.receipt_count',
+};
 // Shared by the transaction list and filter-based bulk allocation, so
 // "Assign all matching" always acts on exactly the set the list showed.
 function transactionWhere(user,params){
@@ -2608,10 +2648,14 @@ async function api(req,res,url){
       if(syncInProgress||receiptWorkerRunning)return json(res,409,{error:'Wait for sync and receipt processing to finish before removing data.'});
       try{
         if(url.pathname.endsWith('/preview')){
-          const p=previewImportRemoval(db,b.dateFrom,b.dateTo);
+          const p=previewImportRemoval(db,b.dateFrom,b.dateTo,{all:b.all===true});
           return json(res,200,{token:p.token,matched:p.matched,removable:p.removable,protected:p.protected,sample:p.rows.slice(0,10).map(t=>({id:t.id,date:t.transaction_date}))});
         }
-        return json(res,200,removeImportedData(db,b.dateFrom,b.dateTo,b.token,u.id));
+        const r=removeImportedData(db,b.dateFrom,b.dateTo,b.token,u.id,{all:b.all===true});
+        // Everything synced is gone: forget "synced up to" so the next default
+        // sync starts fresh (last 24h) instead of only after the old checkpoint.
+        if(b.all===true&&!r.protected)db.prepare('DELETE FROM app_kv WHERE key=?').run('pleo_accounting_entries_settled_last_success');
+        return json(res,200,r);
       }catch(e){return json(res,e.status||500,{error:e.message});}
     }
     if(req.method==='POST'&&url.pathname==='/api/pleo/sync/stop'){
