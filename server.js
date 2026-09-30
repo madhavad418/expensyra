@@ -1318,6 +1318,63 @@ async function importPleoExcel(buffer,{filename,user,dryRun}){
   audit(null,user.id,'PLEO_EXCEL_IMPORTED',{import_id:importId,filename,rows:dataRows,matched:matched.length,projects_created:projectsToCreate.length,projects_linked:rulesToCreate.length+rulesToApprove.length,category_accounts:accounts.length});
   return {dryRun:false, importId, summary, categoryBackfill, projectBackfill};
 }
+// Live sync only carries teamId, so a team first seen in a sync never became a
+// Project (nor showed in Transactions / Admin → Projects) until someone
+// re-imported the Pleo Excel export. After every sync: learn team names (the
+// Pleo Teams API when the key can read it, plus names ingestion already
+// stored), then give every named team that has transactions but no PLEO_TEAM
+// link a Project and an APPROVED link — the same outcome as the Excel import.
+// Existing links (including PROPOSED/REJECTED ones) are left untouched.
+async function fetchPleoTeamNames(){
+  try{
+    const teams=await pagedPleo('GET','/v1/teams',{query:{companyId:cfg.pleoCompanyId},limit:100});
+    return teams.filter(t=>t?.id&&String(t.name||'').trim()).map(t=>({teamId:String(t.id),teamName:String(t.name).trim()}));
+  }catch(e){
+    console.log(`[pleo teams] team names unavailable from the API (${e.statusCode?`HTTP ${e.statusCode}`:e.message}); using names already known`);
+    return [];
+  }
+}
+async function ensureProjectsForSyncedTeams(){
+  const apiTeams=await fetchPleoTeamNames(); const t=iso();
+  const seen=new Map(db.prepare("SELECT team_id,COUNT(*) n,MAX(team_name) team_name FROM transactions WHERE team_id IS NOT NULL AND team_id<>'' GROUP BY team_id").all().map(r=>[r.team_id,r]));
+  const known=new Map(db.prepare('SELECT team_id,team_name FROM pleo_team_names').all().map(r=>[r.team_id,r.team_name]));
+  const newNames=[];
+  for(const tm of apiTeams) if(!known.has(tm.teamId)){ known.set(tm.teamId,tm.teamName); newNames.push(tm); }
+  for(const [teamId,r] of seen) if(!known.has(teamId)&&r.team_name){ known.set(teamId,r.team_name); newNames.push({teamId,teamName:r.team_name}); }
+  const ruleFor=db.prepare("SELECT id FROM project_mapping_rules WHERE source_type='PLEO_TEAM' AND source_value=?");
+  const toLink=[...seen.keys()].filter(id=>known.has(id)&&!ruleFor.get(id)).map(id=>({teamId:id,project:projectFromTeamName(known.get(id))})).filter(x=>x.project);
+  if(!newNames.length&&!toLink.length) return {teamNamesLearned:0,projectsCreated:0,linked:0};
+  const projectByCode=db.prepare('SELECT id FROM projects WHERE code=?');
+  const insProject=db.prepare("INSERT INTO projects(code,name,customer,active,status,created_at,updated_at) VALUES(?,?,?,1,'ACTIVE',?,?)");
+  const insRule=db.prepare("INSERT INTO project_mapping_rules(source_type,source_value,project_id,status,created_at,updated_at,approved_at) VALUES('PLEO_TEAM',?,?,'APPROVED',?,?,?)");
+  const upTeam=db.prepare('INSERT INTO pleo_team_names(team_id,team_name,rows_seen,share,import_id,updated_at) VALUES(?,?,?,1,NULL,?) ON CONFLICT(team_id) DO NOTHING');
+  const fillTeam=db.prepare("UPDATE transactions SET team_name=?,updated_at=? WHERE team_id=? AND (team_name IS NULL OR team_name='')");
+  const created=[];
+  db.exec('BEGIN');
+  try{
+    for(const tm of newNames){ upTeam.run(tm.teamId,tm.teamName,seen.get(tm.teamId)?.n||0,t); fillTeam.run(tm.teamName,t,tm.teamId); }
+    for(const {teamId,project} of toLink){
+      if(!projectByCode.get(project.code)){ insProject.run(project.code,project.name,project.customer,t,t); created.push(project.name); }
+      insRule.run(teamId,projectByCode.get(project.code).id,t,t,t);
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); throw e; }
+  invalidateAttributionContext();
+  const projectBackfill=toLink.length?applyProjectMappingRulesToAll():null;
+  const result={teamNamesLearned:newNames.length,projectsCreated:created.length,linked:toLink.length,projects:created,projectBackfill};
+  if(created.length||toLink.length) audit(null,null,'PROJECTS_LINKED_FROM_SYNC',result);
+  return result;
+}
+// Never lets project linking fail an otherwise successful sync.
+// Skipped in mock mode: fixture teams are demo data (mock seeds its own demo
+// projects) and must stay unlinked for the rule-approval smoke checks.
+async function linkProjectsAfterSync(runId){
+  if(cfg.pleoMockMode) return;
+  try{
+    const r=await ensureProjectsForSyncedTeams();
+    if(r.projectsCreated||r.linked) console.log(`[pleo sync #${runId}] ${r.projectsCreated} project(s) created, ${r.linked} team(s) linked`);
+  }catch(e){ console.error(`[pleo sync #${runId}] project linking failed:`,e.message); }
+}
 // Seeds the Billing Status → Commercial Classification mapping from an
 // explicit business decision (docs/PLEO_SETUP.md §6b) — this is not inferred
 // at runtime, and it never overwrites a mapping an admin has already set.
@@ -1651,6 +1708,7 @@ async function syncPleo(runId, triggerType='manual', userId=null, opts={}) {
       // from the next "since last sync".
       if(!Number.isFinite(lastMs)||(startMs<=lastMs&&endDate.getTime()>lastMs))setKv(checkpointKey,endDate.toISOString());
     } else throw new Error(`Unsupported PLEO_SYNC_MODE: ${mode}`);
+    await linkProjectsAfterSync(runId);
     db.prepare(`UPDATE pleo_sync_runs SET status='SUCCESS',finished_at=?,jobs_seen=?,items_seen=?,inserted_count=?,updated_count=?,attachment_count=?,error_count=? WHERE id=?`).run(iso(),jobs,itemsSeen,inserted,updated,att,errors,runId);
     return {runId}; // fire-and-forget: no caller awaits this value; poll /api/pleo/sync-runs/:runId instead
   }catch(e){
@@ -1715,6 +1773,7 @@ async function syncPleoHistorical(runId, dateFrom, dateTo, triggerType, userId){
       throw Object.assign(new Error(`Live backfill encountered ${demoFixtureCount} known demo-fixture ID(s) while PLEO_MOCK_MODE is off — refusing to continue. This should never happen against a real account; check for ID collisions.`),{status:500});
     }
     console.log(`[Pleo historical backfill] Total fetched: ${itemsSeen} | real=${realCount} demo=${demoFixtureCount} skipped=${skipped}`);
+    await linkProjectsAfterSync(runId);
     db.prepare(`UPDATE pleo_sync_runs SET status='SUCCESS',finished_at=?,items_seen=?,inserted_count=?,updated_count=?,attachment_count=?,error_count=?,real_count=?,demo_fixture_count=?,sample_external_ids=? WHERE id=?`)
       .run(iso(),itemsSeen,inserted,updated,att,errors,realCount,demoFixtureCount,JSON.stringify(sampleExternalIds),runId);
     return {runId};

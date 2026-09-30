@@ -381,7 +381,8 @@ async function followTxSync(c,runId){
   let x;try{x=await pollSyncRun(runId,p=>{const s=document.querySelector('#ds-status');if(s)s.innerHTML=txSyncStatus({},p.run)})}finally{txSyncFollowing=null}
   if(!document.querySelector('#tx-sync'))return; // user left the page; the server keeps syncing regardless
   if(x.run.status==='SUCCESS')toast(`Pleo sync complete · ${fmtCount(x.run.inserted_count)} new, ${fmtCount(x.run.updated_count)} refreshed`);else if(x.run.status==='CANCELLED')toast(x.run.error_message||'Pleo sync stopped');else toast(`Pleo sync ${sentenceCase(x.run.status)}: ${x.run.error_message||'see Pleo Sync'}`,true);
-  state.filterOptions=null;renderTransactions(c);
+  // A sync can create projects for new Pleo teams — refresh the project list too.
+  state.filterOptions=null;await loadBootstrap().catch(()=>{});renderTransactions(c);
 }
 async function loadTxResults(c){
   const out=document.querySelector('#tx-results');if(!out)return;
