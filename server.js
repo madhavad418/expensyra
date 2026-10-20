@@ -1,4 +1,5 @@
-import { exportWorkbook } from './lib/xlsx-export.mjs';
+import { exportWorkbook, exportSheets } from './lib/xlsx-export.mjs';
+import { planProjectImport, PROJECT_IMPORT_COLUMNS, EXAMPLE_PREFIX } from './lib/project-import.mjs';
 import { expandApiExpenseSplits, summarizeExpenses, summarizeCommercialExpenses } from './lib/expense-summary.mjs';
 import { previewImportRemoval, removeImportedData } from './lib/import-removal.mjs';
 import http from 'node:http';
@@ -74,6 +75,8 @@ const cfg = {
 // the database so earlier decisions keep their meaning, but new reviews pick
 // from the active list only.
 const COMMERCIAL_CLASSIFICATIONS = ['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION','REFUND','REIMBURSEMENT'];
+// Classifications a salary deduction can be recorded on (SALARY_DEDUCTION = legacy).
+const SALARY_DEDUCTION_CLASSES = ['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION'];
 const LEGACY_COMMERCIAL_CLASSIFICATIONS = ['PROJECT_COST','SHARED_COST'];
 const COMMERCIAL_CLASSIFICATION_CHECK = `commercial_classification TEXT CHECK(commercial_classification IS NULL OR commercial_classification IN (${[...COMMERCIAL_CLASSIFICATIONS,...LEGACY_COMMERCIAL_CLASSIFICATIONS].map(v=>`'${v}'`).join(',')}))`;
 const CAR_RENTAL_SHEET = '2026 Car Rental Master Data';
@@ -1318,6 +1321,73 @@ async function importPleoExcel(buffer,{filename,user,dryRun}){
   audit(null,user.id,'PLEO_EXCEL_IMPORTED',{import_id:importId,filename,rows:dataRows,matched:matched.length,projects_created:projectsToCreate.length,projects_linked:rulesToCreate.length+rulesToApprove.length,category_accounts:accounts.length});
   return {dryRun:false, importId, summary, categoryBackfill, projectBackfill};
 }
+// === Project import (Administration → Project import) ===
+// Every Pleo team the app knows: named ones (Excel import / Teams API) plus
+// ids seen on transactions, with their transaction count and current project.
+function knownPleoTeams(){
+  const rows=db.prepare(`WITH ids(team_id) AS (SELECT team_id FROM pleo_team_names UNION SELECT DISTINCT team_id FROM transactions WHERE team_id IS NOT NULL AND team_id<>'')
+    SELECT i.team_id, COALESCE((SELECT team_name FROM pleo_team_names n WHERE n.team_id=i.team_id),(SELECT MAX(team_name) FROM transactions t WHERE t.team_id=i.team_id)) team_name,
+      (SELECT COUNT(*) FROM transactions t WHERE t.team_id=i.team_id) transactions,
+      (SELECT p.code FROM project_mapping_rules r JOIN projects p ON p.id=r.project_id WHERE r.source_type='PLEO_TEAM' AND r.source_value=i.team_id) project_code
+    FROM ids i`).all();
+  return rows.sort((a,b)=>(a.team_name||'~').localeCompare(b.team_name||'~')||b.transactions-a.transactions);
+}
+function projectImportContext(){
+  return {
+    projects:db.prepare('SELECT * FROM projects').all(),
+    teams:knownPleoTeams(),
+    rules:db.prepare('SELECT r.id,r.source_type,r.source_value,r.status,p.code project_code FROM project_mapping_rules r JOIN projects p ON p.id=r.project_id').all(),
+  };
+}
+// The downloadable template: a Projects sheet to fill in (example rows are
+// ignored on import), an Instructions sheet and the Pleo teams to link to.
+function buildProjectImportTemplate(){
+  const teams=knownPleoTeams();
+  const sampleTeam=teams.find(t=>t.team_name&&!t.project_code)?.team_name||teams.find(t=>t.team_name)?.team_name||'PRJ-005-CT-AV-US-Waymo';
+  const cols=PROJECT_IMPORT_COLUMNS.map(([field,header])=>[header,field]);
+  const examples=[
+    {code:`${EXAMPLE_PREFIX}001`,name:`${EXAMPLE_PREFIX}001 Your project name`,customer:'Waymo',project_manager:'Jane Smith',country:'United States',status:'Active',start_date:'2026-01-15',end_date:'2026-12-31',commercial_model:'Time and materials',pleo_team:sampleTeam,pleo_tag:''},
+    {code:`${EXAMPLE_PREFIX}001`,name:'',customer:'',project_manager:'',country:'',status:'',start_date:'',end_date:'',commercial_model:'',pleo_team:'(a second Pleo team for the same project goes on its own row)',pleo_tag:''},
+    {code:`${EXAMPLE_PREFIX}002`,name:`${EXAMPLE_PREFIX}002 Internal tooling`,customer:'JSAN',project_manager:'',country:'India',status:'On hold',start_date:'',end_date:'',commercial_model:'Internal',pleo_team:'',pleo_tag:'Project:Internal tooling'},
+  ];
+  const help=[
+    ...PROJECT_IMPORT_COLUMNS.map(([,header,required,what,example])=>({col:header,required,what,example})),
+    {col:'',required:'',what:'',example:''},
+    {col:'How it works',required:'',what:'Fill in the Projects sheet (one row per project; repeat the code on another row to link more Pleo teams), save, then upload it in Administration → Project import. Preview shows every change before anything is written.',example:''},
+    {col:'Example rows',required:'',what:`Rows whose code starts with ${EXAMPLE_PREFIX} are examples and are never imported — delete or overwrite them.`,example:''},
+    {col:'Existing projects',required:'',what:'A code that already exists updates that project. Only filled-in cells change anything; empty cells keep the current value.',example:''},
+    {col:'Project links',required:'',what:'Each Pleo team/tag becomes an approved project link, and its existing transactions are linked straight away. A team already linked to a different project is not moved — change that on the Project links tab.',example:''},
+    {col:'Errors',required:'',what:'If any row has an error (unknown team, bad date or status, missing name for a new project) nothing is imported; the preview lists each row to fix.',example:''},
+  ];
+  return exportSheets([
+    {name:'Projects',rows:examples,columns:cols,widths:[16,34,18,18,16,12,13,13,20,38,26]},
+    {name:'Instructions',rows:help,columns:[['Column','col'],['Required','required'],['What to enter','what'],['Example','example']],widths:[20,18,90,28]},
+    {name:'Pleo teams',rows:teams.map(t=>({id:t.team_id,name:t.team_name||'(name not known yet)',tx:t.transactions,project:t.project_code||''})),columns:[['Team ID','id'],['Pleo team name','name'],['Transactions','tx'],['Currently linked project','project']],widths:[40,40,14,26]},
+  ]);
+}
+function applyProjectImport(plan,user){
+  const t=iso();
+  const FIELDS=['name','customer','project_manager','country','status','start_date','end_date','commercial_model'];
+  db.exec('BEGIN');
+  try{
+    const ins=db.prepare(`INSERT INTO projects(code,${FIELDS.join(',')},active,created_at,updated_at) VALUES(?,${FIELDS.map(()=>'?').join(',')},?,?,?)`);
+    for(const p of plan.projects.create) ins.run(p.code,...FIELDS.map(f=>p[f]??null),p.status==='ACTIVE'?1:0,t,t);
+    for(const u of plan.projects.update){
+      const keys=Object.keys(u.changes).filter(f=>FIELDS.includes(f));
+      const extra=keys.includes('status')?',active=?':'';
+      db.prepare(`UPDATE projects SET ${keys.map(f=>`${f}=?`).join(',')}${extra},updated_at=? WHERE id=?`).run(...keys.map(f=>u.changes[f]),...(extra?[u.changes.status==='ACTIVE'?1:0]:[]),t,u.id);
+    }
+    const projectId=db.prepare('SELECT id FROM projects WHERE code=?');
+    const insRule=db.prepare("INSERT INTO project_mapping_rules(source_type,source_value,project_id,status,created_by,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,'APPROVED',?,?,?,?,?)");
+    for(const l of plan.links.create) insRule.run(l.source_type,l.source_value,projectId.get(l.code).id,user.id,user.id,t,t,t);
+    const approve=db.prepare("UPDATE project_mapping_rules SET status='APPROVED',approved_by=?,approved_at=?,updated_at=? WHERE id=?");
+    for(const l of plan.links.approve) approve.run(user.id,t,t,l.id);
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); throw e; }
+  invalidateAttributionContext();
+  const applied=plan.links.create.length||plan.links.approve.length?applyProjectMappingRulesToAll():null;
+  return applied;
+}
 // Live sync only carries teamId, so a team first seen in a sync never became a
 // Project (nor showed in Transactions / Admin → Projects) until someone
 // re-imported the Pleo Excel export. After every sync: learn team names (the
@@ -1896,12 +1966,15 @@ const TX_SORTS={
   category:"LOWER(COALESCE(t.resolved_category_name,t.category,''))",
   reviewer:"LOWER(COALESCE(u.name,''))",
   receipts:'t.receipt_count',
+  pleo_reviewer:"LOWER(COALESCE(t.pleo_reviewer_names,''))",
 };
 // Shared by the transaction list and filter-based bulk allocation, so
 // "Assign all matching" always acts on exactly the set the list showed.
 function transactionWhere(user,params){
   const wh=[],args=[]; if(user.role==='REVIEWER'){wh.push('t.reviewer_id=?');args.push(user.id);} const status=params.get('status');if(status){wh.push('t.status=?');args.push(status);} const reviewer=params.get('reviewer_id');if(reviewer&&user.role!=='REVIEWER'){wh.push('t.reviewer_id=?');args.push(Number(reviewer));}
   const q=params.get('q');if(q){wh.push('(t.merchant LIKE ? OR t.employee_name LIKE ? OR t.pleo_accounting_entry_id LIKE ? OR t.pleo_reconciliation_id LIKE ?)');const s=`%${q.slice(0,100)}%`;args.push(s,s,s,s);} const project=params.get('project');if(project){wh.push(`${EFFECTIVE_PROJECT_SQL}=?`);args.push(project);}
+  // One person, by Pleo employee id (names aren't unique).
+  const employee=params.get('employee');if(employee){wh.push('t.employee_id=?');args.push(employee);}
   const pleoStatus=params.get('pleo_status');if(pleoStatus){wh.push('t.pleo_status=?');args.push(pleoStatus);}
   const pleoReview=params.get('pleo_review');if(pleoReview){wh.push('t.pleo_review_status=?');args.push(pleoReview);}
   const category=params.get('category');if(category){wh.push('COALESCE(t.resolved_category_name,t.category)=?');args.push(category);}
@@ -2173,7 +2246,9 @@ async function api(req,res,url){
       projects.sort((a,b)=>a.name.localeCompare(b.name));
       const pleoReview=db.prepare("SELECT t.pleo_review_status value,COUNT(*) count,SUM(t.status='UNASSIGNED') unassigned FROM transactions t WHERE t.pleo_review_status IS NOT NULL GROUP BY 1 ORDER BY 2 DESC").all();
       const missingProject=db.prepare("SELECT COUNT(*) count,SUM(status='UNASSIGNED') unassigned FROM transactions WHERE project_status='MISSING_PROJECT'").get();
-      return json(res,200,{projects,pleoReview,missingProject});
+      const employees=db.prepare("SELECT t.employee_id value,MAX(t.employee_name) name,MAX(t.employee_code) code,MAX(t.employee_email) email,COUNT(*) count FROM transactions t WHERE t.employee_id IS NOT NULL AND t.employee_id<>'' GROUP BY t.employee_id").all();
+      employees.sort((a,b)=>(a.name||'~').localeCompare(b.name||'~'));
+      return json(res,200,{projects,pleoReview,missingProject,employees});
     }
     if(req.method==='POST'&&url.pathname==='/api/assign'){
       const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;const b=await readJson(req);const reviewer=db.prepare("SELECT * FROM users WHERE id=? AND active=1 AND role='REVIEWER'").get(Number(b.reviewer_id));if(!reviewer)return json(res,400,{error:'Valid reviewer is required'});
@@ -2218,12 +2293,14 @@ async function api(req,res,url){
     const completeMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/review$/);
     if(req.method==='POST'&&completeMatch){const id=Number(completeMatch[1]);const tx=rowTx(id);if(!tx)return json(res,404,{error:'Not found'});if(tx.reviewer_id!==user.id&&!['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(user.role))return json(res,403,{error:'This transaction is not assigned to you'});if(['APPROVED','REJECTED'].includes(tx.status))return json(res,409,{error:'This decision is final. Use "Edit & re-check" to reopen it first.'});const b=await readJson(req);const decision=String(b.decision||'').toUpperCase();if(!['APPROVED','REJECTED','NEEDS_INFO'].includes(decision))return json(res,400,{error:'Decision must be APPROVED, REJECTED or NEEDS_INFO'});const classification=b.commercial_classification?String(b.commercial_classification).toUpperCase():null;if(decision==='APPROVED'&&!classification)return json(res,400,{error:'Commercial classification is required for approval'});if(classification&&!COMMERCIAL_CLASSIFICATIONS.includes(classification))return json(res,400,{error:`Commercial classification must be one of: ${COMMERCIAL_CLASSIFICATIONS.join(', ')}`});if(decision==='APPROVED'&&classification==='CUSTOMER_BILLABLE'&&!b.project_code)return json(res,400,{error:'Project is required for customer-billable expenses'});
       // Salary deduction: how much of this expense the employee repays, in the
-      // transaction currency. Required to approve; can't exceed the expense.
+      // transaction currency — optional on Customer billable / JSAN internal
+      // (0 = none), never more than the expense. Legacy SALARY_DEDUCTION
+      // reviews still need an amount to approve.
       let salaryDeduction=null;
-      if(classification==='SALARY_DEDUCTION'){
-        const raw=b.salary_deduction_amount;
-        if(raw!=null&&raw!==''){salaryDeduction=Math.round(Number(raw)*100)/100;if(!Number.isFinite(salaryDeduction)||salaryDeduction<=0)return json(res,400,{error:'Salary deduction amount must be a number greater than 0'});if(salaryDeduction>Math.abs(Number(tx.amount)||0)+0.005)return json(res,400,{error:`Salary deduction cannot exceed the transaction amount (${Math.abs(Number(tx.amount)||0).toFixed(2)} ${tx.currency||''})`.trim()});}
-        else if(decision==='APPROVED')return json(res,400,{error:'Enter the salary deduction amount'});
+      if(SALARY_DEDUCTION_CLASSES.includes(classification)){
+        const raw=b.salary_deduction_amount,max=Math.abs(Number(tx.amount)||0);
+        if(raw!=null&&raw!==''){const v=Math.round(Number(raw)*100)/100;if(!Number.isFinite(v)||v<0)return json(res,400,{error:'Salary deduction must be 0 or more'});if(v>max+0.005)return json(res,400,{error:`Salary deduction cannot exceed the transaction amount (${max.toFixed(2)} ${tx.currency||''})`.trim()});salaryDeduction=v>0?v:null;}
+        if(classification==='SALARY_DEDUCTION'&&decision==='APPROVED'&&salaryDeduction==null)return json(res,400,{error:'Enter the salary deduction amount'});
       }if(decision!=='APPROVED'&&!String(b.notes||'').trim())return json(res,400,{error:'Reviewer notes are required for Reject / Need Info'});const reviewProject=b.project_code?db.prepare('SELECT id,code FROM projects WHERE code=?').get(String(b.project_code)):null;if(b.project_code&&!reviewProject)return json(res,400,{error:'Unknown project code'});
       const s=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? AND user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1').get(id,user.id);
       if(!s||Date.now()-Date.parse(s.last_heartbeat_at)>cfg.idleSeconds*1000){if(s)closeSession(s,'IDLE_TIMEOUT',new Date());return json(res,409,{error:'Click Start validation before editing or submitting a decision.'});}
@@ -2374,6 +2451,31 @@ async function api(req,res,url){
       const result=recalculateAllTransactionQuality();
       audit(null,u.id,'QUALITY_FLAGS_RECALCULATED',result);
       return json(res,200,{ok:true,...result});
+    }
+    // === Project import: template download + preview/apply ===
+    if(req.method==='GET'&&url.pathname==='/api/admin/projects-import/template'){
+      const u=requireAuth(req,res,['ADMIN']);if(!u)return;
+      const file=buildProjectImportTemplate();
+      res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Projects_Import_Template.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
+    }
+    if(req.method==='POST'&&url.pathname==='/api/admin/projects-import'){
+      const u=requireAuth(req,res,['ADMIN']);if(!u)return;
+      const filename=clampText(req.headers['x-filename']||'projects.xlsx',240);
+      const buffer=await readBuffer(req);
+      if(!buffer.length) return json(res,400,{error:'No file received'});
+      let sheet;
+      try{ try{ sheet=readSheet(buffer,'Projects'); }catch{ sheet=readFirstSheet(buffer); } }
+      catch(e){ return json(res,400,{error:`Could not read the Excel file: ${e.message}`}); }
+      let plan;
+      try{ plan=planProjectImport(sheet.rows,projectImportContext()); }catch(e){ return json(res,e.status||400,{error:e.message}); }
+      const summary={sheetName:sheet.sheetName,projects:plan.projectCount,examplesSkipped:plan.examples,errors:plan.errors,warnings:plan.warnings,
+        create:plan.projects.create.map(p=>({code:p.code,name:p.name})),update:plan.projects.update.map(p=>({code:p.code,changes:p.changes,before:p.before})),unchanged:plan.projects.unchanged,
+        linksCreate:plan.links.create.map(l=>({code:l.code,label:l.label,type:l.source_type})),linksApprove:plan.links.approve.length,linksUnchanged:plan.links.unchanged,linksConflict:plan.links.conflict};
+      if(url.searchParams.get('dry_run')==='1') return json(res,200,{ok:true,dryRun:true,summary});
+      if(plan.errors.length) return json(res,400,{error:`Fix the ${plan.errors.length} error(s) shown in the preview, then try again.`,summary});
+      const applied=applyProjectImport(plan,u);
+      audit(null,u.id,'PROJECTS_IMPORTED',{filename,created:summary.create.map(p=>p.code),updated:summary.update.map(p=>p.code),links_created:summary.linksCreate.length,links_approved:summary.linksApprove,links_conflict:summary.linksConflict,applied});
+      return json(res,200,{ok:true,dryRun:false,summary,applied});
     }
     // === JSAN Project Master ===
     if(req.method==='GET'&&url.pathname==='/api/admin/projects'){

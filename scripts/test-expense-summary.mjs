@@ -79,8 +79,8 @@ const {summarizeCommercialExpenses}=await import('../lib/expense-summary.mjs');
 const commercialBase={...apiParent,amount:125,currency:'USD',commercial_classification:'SALARY_DEDUCTION',salary_deduction_amount:25};
 const commercial=summarizeCommercialExpenses([
  commercialBase,
- {...commercialBase,commercial_classification:'CUSTOMER_BILLABLE',bill_amount:-50},
- {...commercialBase,commercial_classification:'JSAN_INTERNAL',bill_amount:-10},
+ {...commercialBase,commercial_classification:'CUSTOMER_BILLABLE',bill_amount:-50,salary_deduction_amount:null},
+ {...commercialBase,commercial_classification:'JSAN_INTERNAL',bill_amount:-10,salary_deduction_amount:null},
  {...commercialBase,commercial_classification:'REFUND',bill_amount:12},
  {...commercialBase,commercial_classification:'REFUND',bill_amount:-2},
  {...commercialBase,commercial_classification:'REIMBURSEMENT',bill_amount:-15},
@@ -104,4 +104,14 @@ assert.equal(commercial.length,4,'separate projects, currencies and months');
 const missing=summarizeCommercialExpenses([{...commercialBase,salary_deduction_amount:null}])[0];
 assert.equal(missing.salary_deduction,0);assert.equal(missing.missing_deductions,1);assert.equal(missing.unclassified,100);
 assert.deepEqual(summarizeCommercialExpenses([]),[]);
+// Salary deduction recorded on Customer billable / JSAN internal: split, never double-counted.
+const split=summarizeCommercialExpenses([
+ {...commercialBase,commercial_classification:'CUSTOMER_BILLABLE',salary_deduction_amount:25},   // 25 of 125 USD → 20 of 100 GBP
+ {...commercialBase,commercial_classification:'JSAN_INTERNAL',salary_deduction_amount:125},      // all of it
+ {...commercialBase,commercial_classification:'CUSTOMER_BILLABLE',salary_deduction_amount:0},    // none
+ {...commercialBase,commercial_classification:'JSAN_INTERNAL',salary_deduction_amount:500},      // impossible → ignored
+])[0];
+assert.equal(split.salary_deduction,120);assert.equal(split.customer_billable,180);assert.equal(split.jsan_internal,100);
+assert.equal(split.customer_billable+split.jsan_internal+split.salary_deduction,400,'every expense still adds up to its full amount');
+assert.equal(split.missing_deductions,0);
 console.log('PASS: commercial classifications, partial salary FX, split deduplication, signed refunds, scope and project/month/currency isolation');

@@ -23,20 +23,29 @@ async function renderCarRentals(c,preserveOpen='',refresh=false){
   if(preserveOpen)document.querySelector(`.car-filter[data-filter-key="${preserveOpen}"]`)?.setAttribute('open','');
 }
 const root=document.querySelector('#app');const toastEl=document.querySelector('#toast');
-const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new Set(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
+const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new Set(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtMoney=(n,c='GBP')=>{try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:c||'GBP'}).format(Number(n||0));}catch{return `${c||''} ${Number(n||0).toFixed(2)}`}};
 const fmtTime=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=Math.floor(s%60);return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`};
 const fmtDate=v=>{if(!v)return'—';try{return new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:v.includes?.('T')?'short':undefined}).format(new Date(v))}catch{return v}};
 // Reviewer-chosen commercial classification. Project cost / Shared cost are
 // legacy values: still shown on old decisions, no longer offered.
-const COMMERCIAL_OPTIONS=['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION','REFUND','REIMBURSEMENT'];
+// Salary deduction is no longer a classification of its own: it's an optional
+// amount on a Customer billable / JSAN internal expense (SALARY_DEDUCTION stays
+// readable for transactions saved that way before).
+const COMMERCIAL_OPTIONS=['CUSTOMER_BILLABLE','JSAN_INTERNAL','REFUND','REIMBURSEMENT'];
+const SALARY_SPLIT_CLASSES=['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION'];
 const COMMERCIAL_LABELS={CUSTOMER_BILLABLE:'Customer billable',JSAN_INTERNAL:'JSAN internal',SALARY_DEDUCTION:'Salary deduction',REFUND:'Refund',REIMBURSEMENT:'Reimbursement',PROJECT_COST:'Project cost (legacy)',SHARED_COST:'Shared cost (legacy)'};
-// Net of a salary deduction. The deduction is in the transaction currency, so
-// the billed (company-currency) figure is reduced by the same proportion.
-function salaryNet(value,r,deduction=r.salary_deduction_amount){const d=Number(deduction)||0,base=Math.abs(Number(r.amount)||0);return d>0&&base&&value!=null?Number(value)*(1-Math.min(d,base)/base):value}
-function commercialCell(r){const v=r.commercial_classification;if(!v)return '<span class="muted">—</span>';const label=esc(COMMERCIAL_LABELS[v]||sentenceCase(v));return v==='SALARY_DEDUCTION'&&r.salary_deduction_amount?`${label} · <b>${esc(fmtMoney(r.salary_deduction_amount,r.currency))}</b>`:label}
-function netAmountCell(value,currency,r){const net=salaryNet(value,r);return net===value?esc(fmtMoney(value,currency)):`<span title="Before salary deduction: ${esc(fmtMoney(value,currency))}">${esc(fmtMoney(net,currency))}</span>`}
+// Share of an expense the employee repays through salary. The deduction is in
+// the purchase currency, so billed (company-currency) figures split by the same
+// proportion — the same rule Expense Intelligence uses.
+function salaryShare(r,deduction=r.salary_deduction_amount,cls=r.commercial_classification){const d=Number(deduction)||0,base=Math.abs(Number(r.amount)||0);return d>0&&base&&SALARY_SPLIT_CLASSES.includes(cls)?Math.min(d,base)/base:0}
+const salaryRestLabel=cls=>cls==='SALARY_DEDUCTION'?'JSAN internal':COMMERCIAL_LABELS[cls]||sentenceCase(cls);
+// "Customer billable £120.00 + Salary £27.10" under a full amount.
+function salarySplitParts(value,r,deduction,cls=r.commercial_classification){const share=salaryShare(r,deduction,cls);if(!share||value==null)return null;const v=Number(value),salary=Math.round(v*share*100)/100;return {rest:Math.round((v-salary)*100)/100,salary,label:salaryRestLabel(cls)}}
+function salarySplitLine(value,currency,r){const p=salarySplitParts(value,r);return p?`<div class="tx-split">${esc(p.label)} ${esc(fmtMoney(p.rest,currency))} <span>+ Salary ${esc(fmtMoney(p.salary,currency))}</span></div>`:''}
+function commercialCell(r){const v=r.commercial_classification;if(!v)return '<span class="muted">—</span>';const label=esc(COMMERCIAL_LABELS[v]||sentenceCase(v));return salaryShare(r)&&v!=='SALARY_DEDUCTION'?`${label} <span class="tx-split-tag">+ Salary deduction</span>`:label}
+function netAmountCell(value,currency,r){return esc(fmtMoney(value,currency))+salarySplitLine(value,currency,r)}
 function toast(msg,bad=false){toastEl.textContent=msg;toastEl.className='toast show'+(bad?' bad':'');clearTimeout(toastEl._t);toastEl._t=setTimeout(()=>toastEl.className='toast',3200)}
 function loadingMarkup(){return '<div class="loading-placeholder" aria-hidden="true"></div>'}
 let activeDataRequests=0, dataLoadingTimer=null;
@@ -52,7 +61,7 @@ function endDataLoading(){
   if(!activeDataRequests){clearTimeout(dataLoadingTimer);dataLoadingTimer=null;document.querySelector('#data-loading-indicator')?.remove();}
 }
 async function api(url,opt={}){const quiet=/heartbeat|data-version|sync-runs|daily-sync|\/pleo\/status/.test(url);if(!quiet)beginDataLoading();try{const r=await fetch(url,{...opt,headers:{Accept:'application/json',...(opt.headers||{})}});const ct=r.headers.get('content-type')||'';const p=ct.includes('json')?await r.json():await r.text();if(r.status===401&&!url.startsWith('/api/auth/login')){state.user=null;await renderLogin();throw new Error('Session expired')}if(!r.ok){const base=p?.error||p?.message||`HTTP ${r.status}`;throw new Error(p?.statusCode?`${base} (upstream HTTP ${p.statusCode})`:base)}return p}finally{if(!quiet)endDataLoading()}}
-async function post(url,data={}){if(url.endsWith('/review'))data={...data,manual_category_name:document.querySelector('#manual-category')?.value||null,xpense_id:document.querySelector('#xpense-id')?.value||null,salary_deduction_amount:data.commercial_classification==='SALARY_DEDUCTION'?(document.querySelector('#salary-deduction')?.value||null):null};return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
+async function post(url,data={}){if(url.endsWith('/review'))data={...data,manual_category_name:document.querySelector('#manual-category')?.value||null,xpense_id:document.querySelector('#xpense-id')?.value||null,salary_deduction_amount:SALARY_SPLIT_CLASSES.includes(data.commercial_classification)?(document.querySelector('#salary-deduction')?.value||null):null};return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
 // The server owns sync/backfill jobs — this polls until the run reaches a
 // terminal status, calling onProgress with each snapshot. Closing the browser
 // mid-poll does not cancel the server-side job; reopening Pleo Sync and
@@ -68,10 +77,47 @@ async function pollSyncRun(runId,onProgress){
 function brandLockup(context='GLOBAL GEOSPATIAL • FIELD OPERATIONS • TECHNOLOGY'){return `<div class="brand"><div class="brand-plate"><img class="brand-logo" src="/assets/jsan-logo.png" alt="JSAN" width="87" height="35"></div>${context?`<span class="brand-context">${context}</span>`:''}</div>`}
 
 async function init(){try{const s=await api('/api/setup/status');if(s.setupRequired)return renderSetup();const me=await api('/api/me');state.user=me.user;if(state.user.must_change_password)return renderPasswordChange();await loadBootstrap();renderShell()}catch(e){if(!state.user)renderLogin()}}
-function authFrame(inner){root.innerHTML=`<div class="auth-wrap"><section class="auth-hero"><div class="hero-topline">${brandLockup()}<div class="hero-sector">Internal Operations Platform<br>Finance • Validation • Governance</div></div><div class="hero-copy"><div class="kicker">JSAN Expensyra / Expense Intelligence &amp; Validation</div><h1>Validate spend.<br><em>Control delivery.</em></h1><p>From Pleo source evidence to accountable review: sync, allocate, validate, classify and govern field-operation expenses through one controlled JSAN workflow.</p><div class="hero-process"><div class="hero-step"><b>01</b><span>Sync</span></div><div class="hero-step"><b>02</b><span>Allocate</span></div><div class="hero-step"><b>03</b><span>Review</span></div><div class="hero-step"><b>04</b><span>Classify</span></div><div class="hero-step"><b>05</b><span>Validate</span></div><div class="hero-step"><b>06</b><span>Report</span></div></div></div><div class="hero-foot"><span><strong>JSAN Expensyra</strong> · Phase 1</span><span>Mobilise · Collect · Operate · Process · Validate · Deliver</span></div></section><section class="auth-panel">${inner}</section></div>`}
-function renderSetup(){authFrame(`<div class="kicker">First-time setup</div><h2>Create the application administrator</h2><p>No default password is shipped with this build. Create the first JSAN admin account to initialise access.</p><form id="setup" class="form-grid"><div class="field"><label>Name</label><input name="name" required value="JSAN Expensyra Admin"></div><div class="field"><label>JSAN email</label><input name="email" type="email" required placeholder="name@jsanconsulting.com"></div><div class="field"><label>Password</label><input name="password" type="password" minlength="12" required placeholder="At least 12 characters"></div><button class="btn btn-primary">Create administrator</button><div id="auth-error"></div></form>`);document.querySelector('#setup').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post('/api/setup/admin',Object.fromEntries(f));toast('Administrator created');renderLogin()}catch(x){document.querySelector('#auth-error').innerHTML=`<div class="error-box">${esc(x.message)}</div>`}}}
-function renderPasswordChange(){authFrame(`<div class="kicker">Security requirement</div><h2>Change your temporary password</h2><p>Your administrator created this account with a temporary password. Set a new password before accessing Expensyra.</p><form id="change-password" class="form-grid"><div class="field"><label>Current temporary password</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label>New password</label><input name="new_password" type="password" minlength="12" required autocomplete="new-password"></div><div class="field"><label>Confirm new password</label><input name="confirm_password" type="password" minlength="12" required autocomplete="new-password"></div><button class="btn btn-primary">Change password & continue</button><button id="change-signout" type="button" class="btn btn-soft">Sign out</button><div id="auth-error"></div></form>`);document.querySelector('#change-password').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.currentTarget));if(f.new_password!==f.confirm_password)return document.querySelector('#auth-error').innerHTML='<div class="error-box">New passwords do not match.</div>';try{await post('/api/auth/change-password',{current_password:f.current_password,new_password:f.new_password});state.user.must_change_password=false;await loadBootstrap();renderShell();toast('Password changed')}catch(x){document.querySelector('#auth-error').innerHTML=`<div class="error-box">${esc(x.message)}</div>`}};document.querySelector('#change-signout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()}}
-async function renderLogin(){authFrame(`<div class="kicker">Secure access</div><h2>Sign in to Expensyra</h2><p>Use the JSAN account created by your administrator.</p><form id="login" class="form-grid"><div class="field"><label>Email</label><input name="email" type="email" required autocomplete="username"></div><div class="field"><label>Password</label><input name="password" type="password" required autocomplete="current-password"></div><button class="btn btn-primary">Sign in</button><div id="auth-error"></div></form>`);document.querySelector('#login').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{const p=await post('/api/auth/login',Object.fromEntries(f));state.user=p.user;if(state.user.must_change_password)return renderPasswordChange();await loadBootstrap();renderShell()}catch(x){document.querySelector('#auth-error').innerHTML=`<div class="error-box">${esc(x.message)}</div>`}}}
+const AUTH_RECEIPT=`<div class="auth-receipt"><div class="receipt-heading"><span>EXPENSYRA</span><span>&#8599;</span></div><div class="receipt-glyph"><svg viewBox="0 0 48 48" fill="none"><path d="M14 5h20v38l-5-3-5 3-5-3-5 3V5Z" stroke="currentColor" stroke-width="2"/><path d="M20 15h8M20 22h8M20 29h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><i></i><i></i><div class="receipt-complete"><span>&#10003;</span> Ready for review</div><div class="receipt-scan"></div></div>`;
+function authFrame(inner){root.innerHTML=`<div class="auth-wrap auth-experience"><div class="auth-ambient" aria-hidden="true"><i></i><i></i><i></i></div><header class="auth-header auth-brand-lockup"><img class="auth-product-logo" src="/assets/expensyra-logo-v1.png" alt="Expensyra" width="2172" height="724"><img class="auth-jsan-logo" src="/assets/jsan-logo-transparent.png" alt="JSAN" width="87" height="35"></header><main class="auth-layout"><section class="auth-story"><div class="auth-eyebrow"><span></span> EXPENSE INTELLIGENCE</div><h1>Validate spend.<br><em>Control delivery.</em></h1><p>Every expense. A clear path forward.</p><div class="auth-art" aria-hidden="true"><div class="auth-orbit orbit-one"></div><div class="auth-orbit orbit-two"></div><div class="auth-orbit orbit-three"></div>${AUTH_RECEIPT}<div class="auth-float float-sync"><span>&#8635;</span> Synced</div><div class="auth-float float-check"><span>&#10003;</span> Validated</div><div class="auth-art-caption">SYNC <span>&#8594;</span> ALLOCATE <span>&#8594;</span> VALIDATE</div></div></section><section class="auth-panel"><div class="auth-card"><div class="auth-card-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="11" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>${inner}</div><div class="auth-access-note"></div></section></main><footer class="auth-footer"><span>One workspace. Complete clarity.</span><span>JSAN EXPENSYRA</span></footer></div>`}
+function renderSetup(){authFrame(`<div class="kicker">First-time setup</div><h2>Create the application administrator</h2><p>No default password is shipped with this build. Create the first JSAN admin account to initialise access.</p><form id="setup" class="form-grid"><div class="field"><label for="setup-name">Name</label><input id="setup-name" name="name" required autocomplete="name" value="JSAN Expensyra Admin"></div><div class="field"><label for="setup-email">JSAN email</label><input id="setup-email" name="email" type="email" required autocomplete="username" spellcheck="false" autocapitalize="none" placeholder="name@jsanconsulting.com"></div><div class="field"><label for="setup-password">Password</label><input id="setup-password" name="password" type="password" minlength="12" required autocomplete="new-password" placeholder="At least 12 characters"></div><button class="btn btn-primary">Create administrator</button><div id="auth-error"></div></form>`);document.querySelector('#setup').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post('/api/setup/admin',Object.fromEntries(f));toast('Administrator created');renderLogin()}catch(x){document.querySelector('#auth-error').innerHTML=`<div class="error-box">${esc(x.message)}</div>`}}}
+function renderPasswordChange(){authFrame(`<div class="kicker">Security requirement</div><h2>Change your temporary password</h2><p>Your administrator created this account with a temporary password. Set a new password before accessing Expensyra.</p><form id="change-password" class="form-grid"><div class="field"><label for="cp-current">Current temporary password</label><input id="cp-current" name="current_password" type="password" required autocomplete="current-password"></div><div class="field"><label for="cp-new">New password</label><input id="cp-new" name="new_password" type="password" minlength="12" required autocomplete="new-password"></div><div class="field"><label for="cp-confirm">Confirm new password</label><input id="cp-confirm" name="confirm_password" type="password" minlength="12" required autocomplete="new-password"></div><button class="btn btn-primary">Change password & continue</button><button id="change-signout" type="button" class="btn btn-soft">Sign out</button><div id="auth-error"></div></form>`);document.querySelector('#change-password').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.currentTarget));if(f.new_password!==f.confirm_password)return document.querySelector('#auth-error').innerHTML='<div class="error-box">New passwords do not match.</div>';try{await post('/api/auth/change-password',{current_password:f.current_password,new_password:f.new_password});state.user.must_change_password=false;await loadBootstrap();renderShell();toast('Password changed')}catch(x){document.querySelector('#auth-error').innerHTML=`<div class="error-box">${esc(x.message)}</div>`}};document.querySelector('#change-signout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()}}
+// After a successful sign-in: the receipt is scanned while the workspace loads
+// (work = loadBootstrap), the sign-in steps tick off, then the app opens.
+// Reduced-motion users skip straight to the workspace.
+async function playSignInHandoff(work){
+  const host=document.querySelector('.auth-experience');
+  if(!host||matchMedia('(prefers-reduced-motion: reduce)').matches)return work();
+  const role={ADMIN:'Admin',TEAM_LEAD:'Team lead',REVIEWER:'Reviewer',FINANCE_QC:'Finance QC'}[state.user?.role]||'your role';
+  const steps=[['Verifying credentials','Email and password confirmed'],['Securing your session',`Signed in as ${role}`],['Loading your workspace','Transactions, projects and insights']];
+  host.insertAdjacentHTML('beforeend',`<div class="auth-handoff" role="status" aria-live="polite"><div class="handoff-card"><div class="handoff-art">${AUTH_RECEIPT}<div class="handoff-badge" aria-hidden="true">&#10003;</div></div><ol class="handoff-steps">${steps.map(([t,d])=>`<li><span class="hs-icon" aria-hidden="true"></span><span><b>${t}</b><small>${d}</small></span></li>`).join('')}</ol><p class="handoff-welcome">Welcome back${state.user?.name?`, ${esc(String(state.user.name).split(' ')[0])}`:''}</p></div></div>`);
+  const overlay=host.querySelector('.auth-handoff'),items=[...overlay.querySelectorAll('.handoff-steps li')];
+  const stamp=overlay.querySelector('.receipt-complete');if(stamp)stamp.innerHTML='<span>&#10003;</span> Access granted';
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const job=Promise.resolve().then(work);job.catch(()=>{});
+  try{
+    await wait(60);overlay.classList.add('is-on');
+    for(const li of items){li.classList.add('is-active');await wait(620);li.classList.replace('is-active','is-done')}
+    await job;
+    overlay.classList.add('is-complete');await wait(900);
+  }catch(e){overlay.remove();throw e}
+}
+async function renderLogin(){
+  authFrame(`<div class="kicker">WELCOME BACK</div><h2>Sign in to Expensyra</h2><p>Your workspace, ready when you are.</p><form id="login" class="form-grid"><div class="field"><label for="login-email">Work email</label><input id="login-email" name="email" type="email" required autocomplete="username" placeholder="you@jsanconsulting.com" spellcheck="false" autocapitalize="none"></div><div class="field"><label for="login-password">Password</label><div class="auth-password"><input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="Enter your password"><button type="button" id="toggle-password" aria-controls="login-password" aria-label="Show password" aria-pressed="false">Show</button></div><div id="caps-hint" class="auth-capslock" role="status" hidden>&#8679; Caps Lock is on</div></div><button class="btn btn-primary auth-submit" type="submit"><span>Sign in</span><span aria-hidden="true">&#8594;</span></button><div id="auth-error" role="alert" aria-live="polite"></div></form><div class="auth-help">Need access? Contact your administrator.</div>`);
+  const form=document.querySelector('#login');
+  const error=form.querySelector('#auth-error');
+  const submit=form.querySelector('[type="submit"]');
+  document.querySelector('#toggle-password').onclick=e=>{const input=document.querySelector('#login-password');const show=input.type==='password';input.type=show?'text':'password';e.currentTarget.textContent=show?'Hide':'Show';e.currentTarget.setAttribute('aria-label',show?'Hide password':'Show password');e.currentTarget.setAttribute('aria-pressed',String(show))};
+  const pw=document.querySelector('#login-password'),caps=document.querySelector('#caps-hint');
+  const capsCheck=e=>{if(e.getModifierState)caps.hidden=!e.getModifierState('CapsLock')};
+  pw.addEventListener('keydown',capsCheck);pw.addEventListener('keyup',capsCheck);pw.addEventListener('blur',()=>{caps.hidden=true});
+  form.onsubmit=async e=>{
+    e.preventDefault();if(submit.disabled)return;
+    const f=new FormData(form);error.replaceChildren();submit.disabled=true;form.setAttribute('aria-busy','true');submit.innerHTML='<span>Signing in&hellip;</span><span class="auth-submit-spinner" aria-hidden="true"></span>';
+    try{const p=await post('/api/auth/login',Object.fromEntries(f));state.user=p.user;if(state.user.must_change_password)return renderPasswordChange();await playSignInHandoff(loadBootstrap);renderShell();document.querySelector('.shell')?.classList.add('app-enter')}
+    catch(x){error.innerHTML=`<div class="error-box">${esc(x.message)}</div>`;pw.focus();pw.select()}
+    finally{submit.disabled=false;form.removeAttribute('aria-busy');submit.innerHTML='<span>Sign in</span><span aria-hidden="true">&#8594;</span>'}
+  };
+}
 async function loadBootstrap(){state.bootstrap=await api('/api/bootstrap')}
 const canManage=()=>['ADMIN','TEAM_LEAD'].includes(state.user?.role);const canSeeTeam=()=>['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(state.user?.role);
 function sidebarIcon(name){
@@ -87,7 +133,9 @@ function sidebarIcon(name){
   };
   return '<svg class="nav-icon" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(paths[name]||paths.dashboard)+'</svg>';
 }
-function navItems(){const a=[['dashboard','Overview'],['transactions',state.user.role==='REVIEWER'?'My Queue':'Transactions']];if(canManage())a.push(['pleo','Pleo Sync']);if(canSeeTeam())a.push(['expense','Expense Intelligence']);if(canSeeTeam())a.push(['revops','Review Operations']);if(canSeeTeam())a.push(['team','Team Performance']);if(canManage())a.push(['admin','Administration']);return a}
+// Pleo Sync tab hidden for now (syncing still runs from Transactions and on schedule). Set to true to show it again.
+const SHOW_PLEO_SYNC_TAB=false;
+function navItems(){const a=[['dashboard','Overview'],['transactions',state.user.role==='REVIEWER'?'My Queue':'Transactions']];if(SHOW_PLEO_SYNC_TAB&&canManage())a.push(['pleo','Pleo Sync']);if(canSeeTeam())a.push(['expense','Expense Intelligence']);if(canSeeTeam())a.push(['revops','Review Operations']);if(canSeeTeam())a.push(['team','Team Performance']);if(canManage())a.push(['admin','Administration']);return a}
 function renderShell(){const items=navItems();if(!items.some(([id])=>id===state.page))state.page='dashboard';try{sessionStorage.setItem('spendops.currentPage',state.page)}catch{}root.innerHTML=`<div class="shell"><aside class="sidebar"><div class="sidebar-branding"><div class="product-lockup"><h2 class="expensyra-brand"><img src="/assets/expensyra-logo-v1.png" alt="Expensyra" width="2172" height="724"></h2><div class="product">Expense Intelligence &amp; Validation</div></div></div><nav class="nav">${items.map(([id,l],i)=>`<button data-nav="${id}" data-index="${String(i+1).padStart(2,'0')}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="user-card"><div class="user-name">${esc(state.user.name)}</div><div class="user-role">${esc(state.user.role.replaceAll('_',' '))}</div><button id="logout" class="logout">Sign out →</button></div></aside><main class="main"><header class="topbar"><div class="topbar-left"><span class="topbar-kicker">Operate • Finance • Validate</span><span class="topbar-divider"></span><h1 id="page-title">Expensyra</h1></div><div class="topbar-brand-group"><div id="sync-mini" class="sync-mini"><span class="dot"></span><span>Pleo status</span></div><div class="topbar-jsan"><img src="/assets/jsan-logo-transparent.png" alt="JSAN" width="87" height="35"></div></div></header><section id="content" class="content"></section></main><nav class="mobile-nav">${items.slice(0,4).map(([id,l])=>`<button data-nav="${id}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l.split(' ')[0]}</span></button>`).join('')}</nav></div>`;document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{closeModal(false);state.page=b.dataset.nav;state.revopsView='list';state.revopsReviewerId=null;renderShell();window.scrollTo(0,0)});document.querySelector('#logout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()};renderPage();updateSyncMini()}
 async function updateSyncMini(){const el=document.querySelector('#sync-mini');if(!el||!canSeeTeam())return;try{const p=await api('/api/pleo/status');el.innerHTML=`<span class="dot ${p.configured?'ok':'warn'}"></span><span>${p.configured?(p.latest?.status==='FAILED'?'Pleo sync needs attention':'Pleo connected'):'Pleo not configured'}</span>`}catch{}}
 function pageHead(title,sub,actions=''){document.querySelector('#page-title').textContent=title;return `<div class="page-head"><div class="page-head-copy"><div class="page-eyebrow">JSAN Expensyra / Internal Operations</div><h2>${esc(title)}</h2><p>${sub}</p></div>${actions?`<div class="actions">${actions}</div>`:''}</div>`}
@@ -146,6 +194,9 @@ function personCell(name){
   return `<span class="tx-person"><span class="tx-avatar" style="--h:${h}" aria-hidden="true">${esc(initials)}</span><b>${esc(name)}</b></span>`;
 }
 const receiptCell=r=>r.receipt_count?`<span class="tx-receipt ok" title="${r.receipt_count} receipt(s)">📎 ${r.receipt_count}</span>`:'<span class="tx-receipt missing" title="No receipt evidence">None</span>';
+// Who reviewed the expense in Pleo (company / admin reviewer). Pleo's API does
+// not expose this to our key, so it comes from the Pleo Excel export import.
+const pleoReviewerCell=r=>r.pleo_reviewer_names?esc(r.pleo_reviewer_names):'<span class="muted">—</span>';
 const TX_COLUMNS={
   compact:[
     ['Status',statusChip,'','status'],['Pleo status',pleoStatusChip],['Date',r=>esc(fmtDate(r.transaction_date)),'','date'],
@@ -154,15 +205,17 @@ const TX_COLUMNS={
     ['Category',r=>esc(r.resolved_category_name||r.category||r.expense_type||'—'),'clip','category'],
     ['Commercial Classification',commercialCell,'clip'],
     ['Evidence',receiptCell,'','receipts'],
-    ['Amount',transactionAmount,'money','amount'],
-    ['Reviewer',r=>r.reviewer_name?esc(r.reviewer_name):'<span class="muted">Unallocated</span>','','reviewer'],
+    ['Billed (GBP)',transactionAmount,'money','amount'],
+    ['Purchase amount',r=>netAmountCell(r.amount,r.currency,r),'money'],
+    ['Pleo reviewer',pleoReviewerCell,'clip','pleo_reviewer'],
+    ['JSAN reviewer',r=>r.reviewer_name?esc(r.reviewer_name):'<span class="muted">Unallocated</span>','','reviewer'],
   ],
   excel:[
     ['Date',r=>esc(fmtDate(r.transaction_date)),'','date'],
     ['Expense Type',r=>esc(expenseTypeLabel(r))],
     ['Pleo status',pleoStatusChip],
-    ['Amount',transactionAmount,'money','amount'],
-    ['Orig. amount',r=>netAmountCell(r.amount,r.currency,r),'money'],
+    ['Billed (GBP)',transactionAmount,'money','amount'],
+    ['Purchase amount',r=>netAmountCell(r.amount,r.currency,r),'money'],
     ['Source description',r=>esc(r.merchant||'—'),'clip','merchant'],
     ['Category',r=>esc(r.resolved_category_name||r.category||'—'),'clip','category'],
     ['Commercial Classification',commercialCell,'clip'],
@@ -172,7 +225,7 @@ const TX_COLUMNS={
     ['Receipts',receiptCell,'','receipts'],
     ['Employee Code',r=>esc(r.employee_code||'—')],
     ['Review Status',r=>esc(PLEO_REVIEW_LABELS[r.pleo_review_status]||r.pleo_review_status||'—')],
-    ['Reviewer (Pleo)',r=>`<span class="small">${esc(r.pleo_reviewer_names||'')}</span>`,'clip'],
+    ['Pleo reviewer',pleoReviewerCell,'clip','pleo_reviewer'],
     ['Review Note',r=>`<span class="small">${esc(r.pleo_review_note||'')}</span>`,'clip'],
     ['Merchant Country',r=>esc(r.merchant_country||'—')],
     ['Expense ID',r=>`<span class="small muted">${esc(r.pleo_accounting_entry_id)}</span>`],
@@ -198,15 +251,28 @@ function renderTxTable(rows){
 // Transactions page. The filter + allocation shell renders once; any filter
 // change re-queries and swaps only #tx-results — no "Apply" step, and typing
 // in the search box is never interrupted by a re-render.
-const TX_FILTER_KEYS=['status','pleo_status','q','source','category','project','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','new_since'];
+const TX_FILTER_KEYS=['status','pleo_status','q','source','category','project','employee','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','new_since'];
 const TX_STATUSES=['UNASSIGNED','ASSIGNED','IN_REVIEW','NEEDS_INFO','APPROVED','REJECTED'];
-const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',new_since:'New since'};
+const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,employee:'Employee',pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',new_since:'New since'};
 const ICON_SEARCH='<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 const fmtCount=n=>Number(n||0).toLocaleString('en-GB');
 const sentenceCase=v=>String(v).replaceAll('_',' ').toLowerCase().replace(/^./,m=>m.toUpperCase());
 let txLoadSeq=0;
+function employeeLabels(){
+  const list=state.filterOptions?.employees||[];
+  if(state.employeeLabelCache?.list===list)return state.employeeLabelCache;
+  const seen=new Map();for(const e of list){const n=e.name||'Unknown employee';seen.set(n,(seen.get(n)||0)+1)}
+  const byId=new Map();
+  for(const e of list){
+    const n=e.name||'Unknown employee';
+    const label=seen.get(n)>1?`${n} · ${e.code||e.email||e.value.slice(0,8)}`:n;
+    byId.set(e.value,label);
+  }
+  return state.employeeLabelCache={list,byId};
+}
 function txFilterValueLabel(k,v){
   if(k==='project')return state.filterOptions?.projects.find(o=>o.value===v)?.name||v;
+  if(k==='employee')return employeeLabels().byId.get(v)||v;
   if(k==='pleo_review')return PLEO_REVIEW_LABELS[v]||v;
   if(k==='project_status')return v==='MISSING_PROJECT'?'No project':sentenceCase(v);
   if(k==='status')return sentenceCase(v);
@@ -228,6 +294,7 @@ async function renderTransactions(c){
     <div class="tx-filter-grid">
       <label class="tx-search"><span class="tx-search-caption">Search transactions</span><div class="tx-search-control">${ICON_SEARCH}<input id="tx-search" type="search" placeholder="Search merchant, employee or Pleo ID" value="${esc(f.q)}" autocomplete="off" aria-label="Search transactions"></div></label>
       ${fo?`<label class="tx-field"><span>Project</span><select id="tx-project" data-filter>${opt('','All projects',!projectSel)}${opt('__missing',`No project · ${fmtCount(fo.missingProject.count)}`,projectSel==='__missing')}${fo.projects.map(o=>opt(o.value,`${o.name} · ${fmtCount(o.count)}`,projectSel===o.value)).join('')}</select></label>`:''}
+      ${fo?.employees?`<label class="tx-field tx-employee"><span>Employee</span><select id="tx-employee" data-filter aria-label="Filter by employee">${opt('','All employees · '+fmtCount(fo.employees.length),!f.employee)}${fo.employees.map(e=>opt(e.value,`${employeeLabels().byId.get(e.value)} · ${fmtCount(e.count)}`,f.employee===e.value)).join('')}</select></label>`:''}
       <label class="tx-field"><span>Evidence</span><select id="tx-evidence" data-filter title="Receipt evidence reported by Pleo. Counts follow the other filters.">${opt('','All transactions',!f.receipt_status)}${opt('present','With evidence',f.receipt_status==='present')}${opt('missing','Without evidence',f.receipt_status==='missing')}</select></label>
       <label class="tx-field"><span>JSAN status</span><select id="tx-status" data-filter>${opt('','Any status',!f.status)}${TX_STATUSES.map(s=>opt(s,sentenceCase(s),f.status===s)).join('')}</select></label>
     </div>
@@ -301,6 +368,7 @@ async function renderTransactions(c){
     if(pj){if(pj.value==='__missing'){f.project='';f.project_status='MISSING_PROJECT'}else{f.project=pj.value;if(f.project_status==='MISSING_PROJECT')f.project_status=''}}
     f.pleo_status=document.querySelector('#tx-pleo-status').value;f.status=document.querySelector('#tx-status').value;f.source=document.querySelector('#tx-source').value;
     f.receipt_status=document.querySelector('#tx-evidence').value;
+    const em=document.querySelector('#tx-employee');if(em)f.employee=em.value;
     const pr=document.querySelector('#tx-pleo-review');if(pr)f.pleo_review=pr.value;
     f.dateFrom=document.querySelector('#tx-from').value;f.dateTo=document.querySelector('#tx-to').value;
     refresh();
@@ -570,14 +638,17 @@ openTransaction=async function(id){
     }catch(e){toast(e.message,true)}
   });
   const final=['APPROVED','REJECTED'].includes(tx.status),max=Math.abs(Number(tx.amount)||0);
-  sel.closest('.field').insertAdjacentHTML('afterend',`<div class="field" id="salary-deduction-field" hidden><label for="salary-deduction">Salary deduction amount${tx.currency?` (${esc(tx.currency)})`:''}</label><input id="salary-deduction" type="number" min="0.01" max="${max}" step="0.01" inputmode="decimal" placeholder="How much is deducted from salary?" value="${esc(tx.salary_deduction_amount??'')}" ${final?'disabled':''}><small class="muted">Expense total ${esc(fmtMoney(max,tx.currency))}. The rest stays a company cost.</small></div>`);
+  sel.closest('.field').insertAdjacentHTML('afterend',`<div class="field" id="salary-deduction-field" hidden><label for="salary-deduction">Salary deduction${tx.currency?` (${esc(tx.currency)})`:''} <span class="muted">· optional</span></label><input id="salary-deduction" type="number" min="0" max="${max}" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(tx.salary_deduction_amount??'')}" ${final?'disabled':''}><small class="muted" id="salary-deduction-help">Amount the employee repays from salary, 0 to ${esc(fmtMoney(max,tx.currency))}. The rest stays under the classification above.</small></div>`);
   const box=document.querySelector('#salary-deduction-field'),input=document.querySelector('#salary-deduction'),amountEl=document.querySelector('#tx-modal .amount-big');
   const paint=()=>{
-    const on=sel.value==='SALARY_DEDUCTION';box.hidden=!on;
-    const d=on?Math.min(Number(input.value)||0,max):0;
-    if(amountEl)amountEl.innerHTML=d>0?`${esc(fmtMoney(salaryNet(tx.amount,tx,d),tx.currency))}<div class="amount-sub">Original ${esc(fmtMoney(tx.amount,tx.currency))} · salary deduction −${esc(fmtMoney(d,tx.currency))}</div>`:esc(fmtMoney(tx.amount,tx.currency));
+    const on=SALARY_SPLIT_CLASSES.includes(sel.value);box.hidden=!on;
+    const raw=Number(input.value)||0,over=on&&raw>max+0.005;
+    input.setCustomValidity(over?`Can't be more than ${fmtMoney(max,tx.currency)}`:'');input.classList.toggle('is-invalid',over);
+    // Full amount stays the headline; the split shows underneath.
+    const parts=on&&!over?salarySplitParts(tx.amount,tx,raw,sel.value):null;
+    if(amountEl)amountEl.innerHTML=esc(fmtMoney(tx.amount,tx.currency))+(parts?`<div class="amount-sub">${esc(parts.label)} ${esc(fmtMoney(parts.rest,tx.currency))} + salary deduction ${esc(fmtMoney(parts.salary,tx.currency))}</div>`:'');
   };
-  sel.addEventListener('change',()=>{paint();if(sel.value==='SALARY_DEDUCTION'&&!final)input.focus()});
+  sel.addEventListener('change',()=>{paint();if(SALARY_SPLIT_CLASSES.includes(sel.value)&&!final&&!input.disabled)input.focus()});
   input.addEventListener('input',paint);paint();updateValidationLock();
 };
 function updateValidationLock(){
@@ -698,7 +769,7 @@ async function renderExpense(c){
       const sum=(items,key)=>items.reduce((n,x)=>n+Math.round(x[key]*100),0)/100;
       const totalRow=(label,items)=>'<tr class="expense-current-month"><td><b>'+esc(label)+'</b></td>'+fields.map(([key])=>'<td class="money"><b>'+esc(money(sum(items,key)))+'</b></td>').join('')+'<td class="money">'+esc(money(sum(items,'unclassified')))+'</td></tr>';
       target.innerHTML='<div class="expense-section-intro"><h3>Commercial classification</h3><label>Project<select id="expense-project"><option value="">All projects</option>'+[...names].map(([key,label])=>'<option value="'+esc(key)+'" '+(key===project?'selected':'')+'>'+esc(label)+'</option>').join('')+'</select></label></div>'+
-        '<p class="expense-balance-note">Based on the Commercial classification saved in Transactions, for posted wallet expenses in the selected month and billing currency. Refund credits are positive recoveries; reversals reduce their totals. Salary deductions use the recorded amount converted at the transaction’s billed exchange ratio; the remaining cost is included in JSAN internal cost. Pending, deleted, wallet loads, out-of-pocket and bill-invoice records are excluded.</p>'+
+        '<p class="expense-balance-note">Based on the Commercial classification saved in Transactions, for posted wallet expenses in the selected month and billing currency. Refund credits are positive recoveries; reversals reduce their totals. Salary deducted is the amount recorded on Customer billable / JSAN internal expenses, converted at the transaction’s billed exchange ratio and taken out of that classification, so each expense still adds up to its full amount. Pending, deleted, wallet loads, out-of-pocket and bill-invoice records are excluded.</p>'+
         '<h3>All projects totals</h3><div class="expense-commercial-grid">'+fields.map(([key,label])=>card(label,sum(rows,key),'All projects · '+esc(monthLabel(month)))).join('')+'</div>'+
         panel((project?names.get(project):'All projects')+' · '+monthLabel(month),table(['Project',...fields.map(x=>x[1]),'Unclassified / other'],[
           ...selected.map(x=>'<tr><td><b>'+esc(names.get(projectKey(x)))+'</b></td>'+fields.map(([key])=>'<td class="money">'+esc(money(x[key]))+'</td>').join('')+'<td class="money">'+esc(money(x.unclassified))+'</td></tr>'),
@@ -784,7 +855,7 @@ async function renderAdmin(c){
   const proposed=rules.filter(r=>r.status==='PROPOSED').length,approved=rules.length-proposed;
   const tags=billingResp.groupFound?billingResp.tags:[],mapped=tags.filter(t=>t.spendops_classification).length;
   const roleCounts=Object.keys(ADMIN_ROLE_LABELS).map(r=>[r,users.filter(u=>u.role===r).length]).filter(([,n])=>n);
-  const tabs=[['users','Users',users.length],['projects','Projects',projects.length],['links','Project links',proposed?`${proposed} to approve`:rules.length],['classification','Classification',billingResp.groupFound?`${mapped}/${tags.length}`:''],...(isAdmin?[['import','Pleo import','']]:[]),...(gateResp?[['health','Data health','']]:[])];
+  const tabs=[['users','Users',users.length],['projects','Projects',projects.length],['links','Project links',proposed?`${proposed} to approve`:rules.length],['classification','Classification',billingResp.groupFound?`${mapped}/${tags.length}`:''],...(isAdmin?[['projimport','Project import',''],['import','Pleo import','']]:[]),...(gateResp?[['health','Data health','']]:[])];
   if(!tabs.some(([id])=>id===state.adminTab))state.adminTab='users';
   const tab=state.adminTab;
   const tile=(id,label,value,sub,warn)=>`<button type="button" class="adm-tile ${warn?'warn':''}" data-adm-tab="${id}"><span>${esc(label)}</span><strong>${value}</strong><small>${sub}</small></button>`;
@@ -826,6 +897,16 @@ async function renderAdmin(c){
     <div class="adm-actions"><button id="xl-preview" class="btn btn-soft">Preview</button><button id="xl-import" class="btn btn-primary" disabled>Import</button></div>
     <div id="xl-result"></div></div>`):'';
 
+  // Project import: Excel → Project Master + project links (preview, then import).
+  const PI_COLS=[['Project code','Yes','Unique code. An existing code updates that project.','PRJ-005'],['Project name','New projects','Full name.','PRJ-005-CT-AV-US-Waymo'],['Customer','—','Client.','Waymo'],['Project manager','—','Person responsible.','Jane Smith'],['Country','—','Country of delivery.','United States'],['Status','—','Active, On hold or Closed (default Active).','Active'],['Start date / End date','—','YYYY-MM-DD or an Excel date.','2026-01-15'],['Commercial model','—','How it is billed.','Time and materials'],['Pleo team','—','Team name or ID to link; several separated by ; (see the template’s “Pleo teams” sheet).','PRJ-005-CT-AV-US-Waymo'],['Pleo tag','—','Tag name or Group:Tag to link.','Project:Waymo US']];
+  const projImportSection=isAdmin?card('Project import','Add or update projects and their project links from an Excel file.',`<div class="adm-pad">
+    <div class="pi-steps"><div><b>1</b><span>Download the template — it has an example, instructions and your Pleo teams.</span></div><div><b>2</b><span>Fill in the <b>Projects</b> sheet, one row per project (repeat a code to link more teams).</span></div><div><b>3</b><span>Upload, check the preview, then import.</span></div></div>
+    <div class="adm-actions"><button type="button" id="pi-template" class="btn btn-soft">⬇ Download template (.xlsx)</button></div>
+    <details class="pi-structure"><summary>File structure — columns in the <b>Projects</b> sheet</summary><div class="table-wrap"><table class="table"><thead><tr><th>Column</th><th>Required</th><th>What to enter</th><th>Example</th></tr></thead><tbody>${PI_COLS.map(([c,r,w,e])=>`<tr><td><b>${esc(c)}</b></td><td>${esc(r)}</td><td>${esc(w)}</td><td class="adm-nowrap"><span class="adm-code">${esc(e)}</span></td></tr>`).join('')}</tbody></table></div><p class="small muted">Rows whose code starts with <span class="adm-code">EXAMPLE-</span> are ignored. For existing projects, only filled-in cells change. A Pleo team already linked to another project is never moved silently — it is listed so you can change it on the Project links tab.</p></details>
+    <label class="adm-drop" for="pi-file"><input id="pi-file" type="file" accept=".xlsx"><span class="adm-drop-icon" aria-hidden="true">⬆</span><b id="pi-file-name">Choose your projects file (.xlsx)</b><small>Preview first — nothing is written until you import.</small></label>
+    <div class="adm-actions"><button id="pi-preview" class="btn btn-soft">Preview</button><button id="pi-import" class="btn btn-primary" disabled>Import</button></div>
+    <div id="pi-result" aria-live="polite"></div></div>`):'';
+
   const g=gateResp;
   const healthSection=g?`<div class="adm-health">
     ${card('Commercial classification','From the Pleo Billing Status tag group.',`<div class="adm-stats">${stat('Billing Status tags',g.commercialClassification.billingStatusTags)}${stat('Mapped',g.commercialClassification.mapped,'ok')}${stat('Missing',g.commercialClassification.missing,g.commercialClassification.missing?'warn':'ok')}</div>`)}
@@ -833,7 +914,7 @@ async function renderAdmin(c){
     ${card('Categories','Resolved through the Pleo chart of accounts.',`<div class="adm-stats">${stat('Resolved',g.category.resolved,'ok')}${stat('Missing account ID',g.category.missingAccountId,g.category.missingAccountId?'warn':'')}${stat('Account not found',g.category.accountIdNotFound,g.category.accountIdNotFound?'warn':'')}${stat('Pending mapping',g.category.pendingMapping,g.category.pendingMapping?'warn':'')}</div>`)}
   </div>`:'';
 
-  const sections={users:usersSection,projects:projectsSection,links:linksSection,classification:classificationSection,import:importSection,health:healthSection};
+  const sections={users:usersSection,projects:projectsSection,links:linksSection,classification:classificationSection,projimport:projImportSection,import:importSection,health:healthSection};
   document.querySelector('#page-title').textContent='Administration';
   c.innerHTML=`<div class="adm">
     <header class="adm-hero">
@@ -865,6 +946,41 @@ async function renderAdmin(c){
   document.querySelector('#approve-all-rules')?.addEventListener('click',async e=>{
     e.currentTarget.disabled=true;
     try{const r=await post('/api/admin/project-mapping-rules/approve-all',{});toast(`${r.approved} rule(s) approved · ${r.applied?.ruleAssigned??0} transaction(s) now mapped to a project`);renderAdmin(c)}catch(x){toast(x.message,true);e.currentTarget.disabled=false}
+  });
+  document.querySelector('#pi-template')?.addEventListener('click',async e=>{
+    const b=e.currentTarget;b.disabled=true;beginDataLoading();
+    try{const r=await fetch('/api/admin/projects-import/template');if(!r.ok)throw Error((await r.json()).error||'Download failed');const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Expensyra_Projects_Import_Template.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);toast('Template downloaded')}
+    catch(x){toast(x.message,true)}finally{b.disabled=false;endDataLoading()}
+  });
+  const PI_FIELD={name:'Name',customer:'Customer',project_manager:'Manager',country:'Country',status:'Status',start_date:'Start',end_date:'End',commercial_model:'Commercial model'};
+  const piRender=(s,dryRun,applied)=>{
+    const li=(k,v)=>`<tr><td>${k}</td><td class="right"><b>${v}</b></td></tr>`;
+    const list=(items,fmt)=>items.length?`<ul class="pi-list">${items.slice(0,40).map(x=>`<li>${fmt(x)}</li>`).join('')}${items.length>40?`<li class="muted">… ${fmtCount(items.length-40)} more</li>`:''}</ul>`:'';
+    const errs=s.errors||[];
+    return `<div class="notice ${errs.length?'warning':''}" style="margin-top:16px"><b>${errs.length?`${fmtCount(errs.length)} error(s) — fix them in the file and preview again`:dryRun?'Preview — nothing written yet':'Import complete'}</b> · sheet “${esc(s.sheetName)}”${s.examplesSkipped?` · ${fmtCount(s.examplesSkipped)} example row(s) ignored`:''}</div>
+      ${errs.length?`<div class="table-wrap"><table class="table pi-errors"><thead><tr><th>Row</th><th>Project</th><th>Problem</th></tr></thead><tbody>${errs.map(e=>`<tr><td>${e.row}</td><td>${esc(e.code||'—')}</td><td>${esc(e.message)}</td></tr>`).join('')}</tbody></table></div>`:''}
+      <div class="table-wrap"><table class="table"><tbody>${li('Projects in file',fmtCount(s.projects))}${li(dryRun?'New projects to create':'Projects created',fmtCount(s.create.length))}${li(dryRun?'Existing projects to update':'Projects updated',fmtCount(s.update.length))}${li('Already up to date',fmtCount(s.unchanged))}${li(dryRun?'Project links to add':'Project links added',fmtCount(s.linksCreate.length))}${s.linksApprove?li('Waiting links to approve',fmtCount(s.linksApprove)):''}${li('Links already in place',fmtCount(s.linksUnchanged))}${applied?li('Transactions now linked to a project',fmtCount(applied.ruleAssigned??0)):''}</tbody></table></div>
+      ${list(s.create,p=>`<b>New</b> <span class="adm-code">${esc(p.code)}</span> ${esc(p.name)}`)}
+      ${list(s.update,u=>`<b>Update</b> <span class="adm-code">${esc(u.code)}</span> ${Object.entries(u.changes).map(([f,v])=>`${esc(PI_FIELD[f]||f)}: <s class="muted">${esc(u.before[f]??'—')}</s> → ${esc(v)}`).join(' · ')}`)}
+      ${list(s.linksCreate,l=>`<b>Link</b> ${esc(l.label)} → <span class="adm-code">${esc(l.code)}</span>`)}
+      ${s.linksConflict.length?`<div class="notice warning" style="margin-top:8px"><b>${fmtCount(s.linksConflict.length)} link(s) left as they are</b> — already linked to another project. Change them on the Project links tab if needed:${list(s.linksConflict,l=>`${esc(l.label)}: currently <span class="adm-code">${esc(l.current)}</span>, file says <span class="adm-code">${esc(l.code)}</span>`)}</div>`:''}
+      ${(s.warnings||[]).length?`<div class="notice" style="margin-top:8px">${list(s.warnings,w=>`Row ${w.row}: ${esc(w.message)}`)}</div>`:''}`;
+  };
+  const piUpload=async dryRun=>{
+    const file=document.querySelector('#pi-file').files[0];if(!file){toast('Choose your projects .xlsx file',true);return null}
+    const out=document.querySelector('#pi-result');out.innerHTML=`<div class="muted small" style="margin-top:12px">${dryRun?'Checking':'Importing'} ${esc(file.name)}…</div>`;
+    const r=await fetch(`/api/admin/projects-import${dryRun?'?dry_run=1':''}`,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':file.name},body:file});
+    const p=await r.json().catch(()=>({}));
+    if(!r.ok&&!p.summary)throw Error(p.error||'Import failed');
+    out.innerHTML=piRender(p.summary,dryRun||!r.ok,p.applied);
+    return {ok:r.ok,summary:p.summary};
+  };
+  document.querySelector('#pi-file')?.addEventListener('change',e=>{document.querySelector('#pi-import').disabled=true;document.querySelector('#pi-result').innerHTML='';const f=e.currentTarget.files[0];document.querySelector('#pi-file-name').textContent=f?f.name:'Choose your projects file (.xlsx)';e.currentTarget.closest('.adm-drop').classList.toggle('has-file',Boolean(f))});
+  document.querySelector('#pi-preview')?.addEventListener('click',async()=>{try{const r=await piUpload(true);const s=r?.summary;document.querySelector('#pi-import').disabled=!s||s.errors.length>0||!(s.create.length||s.update.length||s.linksCreate.length||s.linksApprove)}catch(x){document.querySelector('#pi-result').innerHTML=`<div class="error-box" style="margin-top:12px">${esc(x.message)}</div>`}});
+  document.querySelector('#pi-import')?.addEventListener('click',async e=>{
+    e.currentTarget.disabled=true;
+    try{const r=await piUpload(false);if(!r?.ok)return;toast('Projects imported');const html=document.querySelector('#pi-result').innerHTML;await loadBootstrap();state.filterOptions=null;await renderAdmin(c);const slot=document.querySelector('#pi-result');if(slot)slot.innerHTML=html}
+    catch(x){document.querySelector('#pi-result').innerHTML=`<div class="error-box" style="margin-top:12px">${esc(x.message)}</div>`}
   });
   const xlUpload=async dryRun=>{
     const file=document.querySelector('#xl-file').files[0];if(!file)return toast('Choose a Pleo export .xlsx file',true);

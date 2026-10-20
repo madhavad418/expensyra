@@ -18,8 +18,9 @@
     "test:analytics": "node scripts/test-analytics.mjs",
     "test:car-rentals": "node scripts/test-car-rentals.mjs",
     "test:daily-sync": "node scripts/test-daily-sync.mjs",
+    "test:project-import": "node scripts/test-project-import.mjs",
     "car-rentals:import": "node scripts/build-car-rental-cache.mjs",
-    "projects:push": "node scripts/push-projects.mjs",
+    "setup:push": "node scripts/push-setup.mjs",
     "snapshot:create": "node scripts/create-reconciliation-snapshot.mjs",
     "gate:report": "node scripts/reconciliation-gate-report.mjs"
   },
