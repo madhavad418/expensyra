@@ -23,7 +23,10 @@ async function renderCarRentals(c,preserveOpen='',refresh=false){
   if(preserveOpen)document.querySelector(`.car-filter[data-filter-key="${preserveOpen}"]`)?.setAttribute('open','');
 }
 const root=document.querySelector('#app');const toastEl=document.querySelector('#toast');
-const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new Set(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
+// Selected transaction ids. allMatching = "every transaction matching the
+// current filters" (all pages); any clear() — filter change, Esc, Clear — ends it.
+class TxSelection extends Set{constructor(){super();this.allMatching=false}clear(){this.allMatching=false;super.clear()}}
+const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new TxSelection(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtMoney=(n,c='GBP')=>{try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:c||'GBP'}).format(Number(n||0));}catch{return `${c||''} ${Number(n||0).toFixed(2)}`}};
 const fmtTime=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=Math.floor(s%60);return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`};
@@ -136,7 +139,7 @@ function sidebarIcon(name){
 // Pleo Sync tab hidden for now (syncing still runs from Transactions and on schedule). Set to true to show it again.
 const SHOW_PLEO_SYNC_TAB=false;
 function navItems(){const a=[['dashboard','Overview'],['transactions',state.user.role==='REVIEWER'?'My Queue':'Transactions']];if(SHOW_PLEO_SYNC_TAB&&canManage())a.push(['pleo','Pleo Sync']);if(canSeeTeam())a.push(['expense','Expense Intelligence']);if(canSeeTeam())a.push(['revops','Review Operations']);if(canSeeTeam())a.push(['team','Team Performance']);if(canManage())a.push(['admin','Administration']);return a}
-function renderShell(){const items=navItems();if(!items.some(([id])=>id===state.page))state.page='dashboard';try{sessionStorage.setItem('spendops.currentPage',state.page)}catch{}root.innerHTML=`<div class="shell"><aside class="sidebar"><div class="sidebar-branding"><div class="product-lockup"><h2 class="expensyra-brand"><img src="/assets/expensyra-logo-v1.png" alt="Expensyra" width="2172" height="724"></h2><div class="product">Expense Intelligence &amp; Validation</div></div></div><nav class="nav">${items.map(([id,l],i)=>`<button data-nav="${id}" data-index="${String(i+1).padStart(2,'0')}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="user-card"><div class="user-name">${esc(state.user.name)}</div><div class="user-role">${esc(state.user.role.replaceAll('_',' '))}</div><button id="logout" class="logout">Sign out →</button></div></aside><main class="main"><header class="topbar"><div class="topbar-left"><span class="topbar-kicker">Operate • Finance • Validate</span><span class="topbar-divider"></span><h1 id="page-title">Expensyra</h1></div><div class="topbar-brand-group"><div id="sync-mini" class="sync-mini"><span class="dot"></span><span>Pleo status</span></div><div class="topbar-jsan"><img src="/assets/jsan-logo-transparent.png" alt="JSAN" width="87" height="35"></div></div></header><section id="content" class="content"></section></main><nav class="mobile-nav">${items.slice(0,4).map(([id,l])=>`<button data-nav="${id}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l.split(' ')[0]}</span></button>`).join('')}</nav></div>`;document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{closeModal(false);state.page=b.dataset.nav;state.revopsView='list';state.revopsReviewerId=null;renderShell();window.scrollTo(0,0)});document.querySelector('#logout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()};renderPage();updateSyncMini()}
+function renderShell(){const items=navItems();if(!items.some(([id])=>id===state.page))state.page='dashboard';try{sessionStorage.setItem('spendops.currentPage',state.page)}catch{}root.innerHTML=`<div class="shell"><aside class="sidebar"><div class="sidebar-branding"><div class="product-lockup"><h2 class="expensyra-brand"><img src="/assets/expensyra-logo-v1.png" alt="Expensyra" width="2172" height="724"></h2><div class="product">Expense Intelligence &amp; Validation</div></div></div><nav class="nav">${items.map(([id,l],i)=>`<button data-nav="${id}" data-index="${String(i+1).padStart(2,'0')}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="user-card"><div class="user-name">${esc(state.user.name)}</div><div class="user-role">${esc(state.user.role.replaceAll('_',' '))}</div><button id="logout" class="logout">Sign out →</button></div></aside><main class="main"><header class="topbar"><div class="topbar-left"><h1 id="page-title">Expensyra</h1></div><div class="topbar-brand-group"><div id="sync-mini" class="sync-mini"><span class="dot"></span><span>Pleo status</span></div><div class="topbar-jsan"><img src="/assets/jsan-logo-transparent.png" alt="JSAN" width="87" height="35"></div></div></header><section id="content" class="content"></section></main><nav class="mobile-nav">${items.slice(0,4).map(([id,l])=>`<button data-nav="${id}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l.split(' ')[0]}</span></button>`).join('')}</nav></div>`;document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{closeModal(false);state.page=b.dataset.nav;state.revopsView='list';state.revopsReviewerId=null;renderShell();window.scrollTo(0,0)});document.querySelector('#logout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()};renderPage();updateSyncMini()}
 async function updateSyncMini(){const el=document.querySelector('#sync-mini');if(!el||!canSeeTeam())return;try{const p=await api('/api/pleo/status');el.innerHTML=`<span class="dot ${p.configured?'ok':'warn'}"></span><span>${p.configured?(p.latest?.status==='FAILED'?'Pleo sync needs attention':'Pleo connected'):'Pleo not configured'}</span>`}catch{}}
 function pageHead(title,sub,actions=''){document.querySelector('#page-title').textContent=title;return `<div class="page-head"><div class="page-head-copy"><div class="page-eyebrow">JSAN Expensyra / Internal Operations</div><h2>${esc(title)}</h2><p>${sub}</p></div>${actions?`<div class="actions">${actions}</div>`:''}</div>`}
 async function renderPage(){const c=document.querySelector('#content');if(!c)return;c.innerHTML=loadingMarkup();try{if(state.page==='dashboard')await renderDashboard(c);else if(state.page==='transactions')await renderTransactions(c);else if(state.page==='car-rentals')await renderCarRentals(c);else if(state.page==='pleo')await renderPleo(c);else if(state.page==='team')await renderTeam(c);else if(state.page==='expense')await renderExpense(c);else if(state.page==='revops')await renderRevops(c);else if(state.page==='admin')await renderAdmin(c)}catch(e){c.innerHTML=`<div class="notice danger">${esc(e.message)}</div>`}}
@@ -244,7 +247,7 @@ function renderTxTable(rows){
   };
   const head=`${canManage()?'<th class="tx-check-col"><input id="tx-check-all" class="check" type="checkbox" aria-label="Select all on this page"></th>':''}${cols.map(th).join('')}`;
   const anyFilter=TX_FILTER_KEYS.some(k=>state.filters[k]);
-  const body=rows.length?rows.map(r=>`<tr class="clickable${state.selected.has(r.id)?' is-selected':''}" data-open="${r.id}" tabindex="0">${canManage()?`<td class="tx-check-col"><input class="check tx-check" data-id="${r.id}" type="checkbox" ${state.selected.has(r.id)?'checked':''} aria-label="Select transaction ${r.id}"></td>`:''}${cols.map(([,cell,cls])=>{const html=cell(r);return `<td${cls?` class="${cls}"`:''}${cls==='clip'?` title="${html.replace(/<[^>]*>/g,'')}"`:''}>${html}</td>`}).join('')}</tr>`).join('')
+  const body=rows.length?rows.map(r=>`<tr class="clickable${state.selected.allMatching||state.selected.has(r.id)?' is-selected':''}" data-open="${r.id}" tabindex="0">${canManage()?`<td class="tx-check-col"><input class="check tx-check" data-id="${r.id}" type="checkbox" ${state.selected.allMatching||state.selected.has(r.id)?'checked':''} aria-label="Select transaction ${r.id}"></td>`:''}${cols.map(([,cell,cls])=>{const html=cell(r);return `<td${cls?` class="${cls}"`:''}${cls==='clip'?` title="${html.replace(/<[^>]*>/g,'')}"`:''}>${html}</td>`}).join('')}</tr>`).join('')
     :`<tr><td colspan="${cols.length+1}"><div class="tx-empty"><div class="tx-empty-icon" aria-hidden="true">${ICON_SEARCH}</div><b>No transactions match</b><span>${anyFilter?'Try removing a filter or widening the date range.':'Sync from Pleo to bring transactions in.'}</span>${anyFilter?'<button type="button" class="btn btn-soft" data-reset-filters>Clear all filters</button>':''}</div></td></tr>`;
   return `<div class="table-wrap tx-table-wrap"><table class="table tx-table${state.txDense?' is-dense':''}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
@@ -380,15 +383,18 @@ async function renderTransactions(c){
 
   if(manage){
     const chosenReviewer=()=>{const rid=Number(document.querySelector('#bulk-reviewer').value);if(!rid)toast('Choose a reviewer first',true);return rid};
-    document.querySelector('#bulk-assign-all').onclick=async()=>{
-      const rid=chosenReviewer();if(!rid)return;const who=reviewers.find(r=>r.id===rid)?.name||'reviewer';const total=state.txTotal||0;
+    const assignAllMatching=async rid=>{
+      const who=reviewers.find(r=>r.id===rid)?.name||'reviewer';const total=state.txTotal||0;
       const filter={};for(const k of TX_FILTER_KEYS)if(f[k])filter[k]=f[k];
       const warn=f.status==='UNASSIGNED'?'':'\n\nJSAN status is not "Unassigned", so transactions already allocated to other reviewers will be re-allocated. Approved/rejected ones are skipped.';
       if(!confirm(`Assign all ${fmtCount(total)} matching transaction(s) to ${who}?${warn}`))return;
       try{const r=await post('/api/assign',{reviewer_id:rid,filter,expected_count:total});state.selected.clear();state.filterOptions=null;toast(`${fmtCount(r.assigned)} transaction(s) allocated to ${who}${r.skippedFinal?` · ${r.skippedFinal} already final, skipped`:''}`);renderTransactions(c)}catch(e){toast(e.message,true)}
     };
+    document.querySelector('#bulk-assign-all').onclick=()=>{const rid=chosenReviewer();if(rid)assignAllMatching(rid)};
     const allocateSelected=async rid=>{
-      if(!rid)return toast('Choose a reviewer first',true);if(!state.selected.size)return toast('Tick at least one transaction',true);
+      if(!rid)return toast('Choose a reviewer first',true);
+      if(state.selected.allMatching)return assignAllMatching(rid);
+      if(!state.selected.size)return toast('Tick at least one transaction',true);
       const who=reviewers.find(r=>r.id===rid)?.name||'reviewer';
       try{const r=await post('/api/assign',{reviewer_id:rid,transaction_ids:[...state.selected]});state.selected.clear();state.filterOptions=null;toast(`${fmtCount(r.assigned)} transaction(s) allocated to ${who}`);renderTransactions(c)}catch(e){toast(e.message,true)}
     };
@@ -552,6 +558,7 @@ async function loadTxResults(c){
     <div class="tx-status-tabs" role="tablist" aria-label="Filter by JSAN status">${tabs.map(([v,l,n])=>`<button type="button" role="tab" aria-selected="${f.status===v}" class="tx-status-tab${f.status===v?' on':''}" data-status-tab="${v}">${v?`<span class="tx-tab-dot s-${v}"></span>`:''}${esc(l)}${n==null?"":`<b>${fmtCount(n)}</b>`}</button>`).join('')}</div>
     <div class="panel-head tx-panel-head"><h3>Showing ${fmtCount(pageStart)}–${fmtCount(pageEnd)} <span class="muted">of ${fmtCount(p.total)}</span></h3>
       <div class="tx-view-tools"><button type="button" id="tx-density" class="tx-icon-btn${state.txDense?' on':''}" aria-pressed="${state.txDense}" title="Tighter rows, more on screen">Dense rows</button><div class="seg" role="group" aria-label="Table layout"><button type="button" data-view="excel" class="${state.txView==='excel'?'on':''}">Excel view</button><button type="button" data-view="compact" class="${state.txView==='compact'?'on':''}">Compact</button></div></div></div>
+    <div id="tx-select-banner" class="tx-select-banner" role="status" hidden></div>
     ${renderTxTable(rows)}
     <div class="tx-pager"><select id="tx-pagesize" aria-label="Rows per page">${[25,50,100,200].map(n=>`<option value="${n}" ${state.txPageSize===n?'selected':''}>${n} per page</option>`).join('')}</select>
       <nav class="tx-pager-nav" aria-label="Pages"><button type="button" class="tx-page" data-page="${p.page-1}" ${p.page<=1?'disabled':''} aria-label="Previous page">‹</button>${pageBtns}<button type="button" class="tx-page" data-page="${p.page+1}" ${p.page>=p.totalPages?'disabled':''} aria-label="Next page">›</button></nav>
@@ -564,12 +571,20 @@ async function loadTxResults(c){
   out.querySelectorAll('[data-status-tab]').forEach(b=>b.onclick=()=>{f.status=b.dataset.statusTab;const sel=document.querySelector('#tx-status');if(sel)sel.value=f.status;state.txPage=1;state.selected.clear();loadTxResults(c)});
   out.querySelectorAll('[data-sort]').forEach(b=>b.onclick=()=>{const k=b.dataset.sort;if(state.txSort===k)state.txDir=state.txDir==='asc'?'desc':'asc';else{state.txSort=k;state.txDir=['date','amount','receipts'].includes(k)?'desc':'asc'}state.txPage=1;loadTxResults(c)});
   const boxes=[...document.querySelectorAll('.tx-check')];let lastIdx=null;
-  const setBox=(b,on)=>{b.checked=on;const id=Number(b.dataset.id);on?state.selected.add(id):state.selected.delete(id);b.closest('tr').classList.toggle('is-selected',on)};
+  const setBox=(b,on)=>{
+    if(!on&&state.selected.allMatching){state.selected.clear();for(const x of boxes)if(x!==b&&x.checked)state.selected.add(Number(x.dataset.id))}
+    b.checked=on;const id=Number(b.dataset.id);on?state.selected.add(id):state.selected.delete(id);b.closest('tr').classList.toggle('is-selected',on)};
   // Shift-click ticks (or unticks) the whole run from the last box clicked.
   boxes.forEach((x,i)=>x.onclick=e=>{e.stopPropagation();if(e.shiftKey&&lastIdx!=null){const a=Math.min(lastIdx,i),b=Math.max(lastIdx,i);for(let j=a;j<=b;j++)setBox(boxes[j],x.checked)}else setBox(x,x.checked);lastIdx=i;syncTxSelection()});
   const checkAll=document.querySelector('#tx-check-all');
   if(checkAll){checkAll.checked=boxes.length>0&&boxes.every(b=>b.checked);checkAll.onclick=e=>{e.stopPropagation();for(const b of boxes)setBox(b,checkAll.checked);syncTxSelection()}}
   syncTxSelection();
+  out.querySelector('#tx-select-banner').onclick=e=>{
+    const a=e.target.closest('[data-select]');if(!a)return;
+    if(a.dataset.select==='all'){for(const b of boxes){b.checked=true;b.closest('tr').classList.add('is-selected');state.selected.add(Number(b.dataset.id))}state.selected.allMatching=true;if(checkAll)checkAll.checked=true}
+    else{state.selected.clear();for(const b of boxes){b.checked=false;b.closest('tr').classList.remove('is-selected')}if(checkAll)checkAll.checked=false}
+    syncTxSelection();
+  };
   document.querySelectorAll('[data-open]').forEach(tr=>{
     tr.onclick=e=>{if(e.target.closest('.tx-check-col'))return;openTransaction(Number(tr.dataset.open))};
     tr.onkeydown=e=>{if(e.key==='Enter'&&e.target===tr)openTransaction(Number(tr.dataset.open))};
@@ -586,8 +601,17 @@ function txPageList(page,total){
 }
 // Selected-count readouts + the floating bulk bar, kept in step with state.selected.
 function syncTxSelection(){
-  const n=state.selected.size,el=document.querySelector('#tx-sel-count');if(el)el.textContent=fmtCount(n);
-  const bar=document.querySelector('#tx-bulkbar');if(!bar)return;bar.hidden=!n;document.querySelector('#tx-bulk-count').textContent=fmtCount(n);
+  const all=state.selected.allMatching,total=state.txTotal||0,n=all?total:state.selected.size;
+  const el=document.querySelector('#tx-sel-count');if(el)el.textContent=fmtCount(n);
+  const banner=document.querySelector('#tx-select-banner');
+  if(banner){
+    const boxes=[...document.querySelectorAll('.tx-check')],pageAll=boxes.length>0&&boxes.every(b=>b.checked);
+    if(all)banner.innerHTML=`<span>All <b>${fmtCount(total)}</b> transactions matching your filters are selected, across every page.</span><button type="button" data-select="none">Clear selection</button>`;
+    else if(pageAll&&total>boxes.length)banner.innerHTML=`<span>All <b>${fmtCount(boxes.length)}</b> transactions on this page are selected.</span><button type="button" data-select="all">Select all ${fmtCount(total)} matching transactions</button>`;
+    banner.hidden=!(all||(pageAll&&total>boxes.length));
+  }
+  const bar=document.querySelector('#tx-bulkbar');if(!bar)return;bar.hidden=!n;
+  document.querySelector('#tx-bulk-count').textContent=fmtCount(n);bar.classList.toggle('is-all',all);
 }
 // At-a-glance numbers for everything matching the filters (not just this page).
 // Cards that point at a gap are clickable and apply that filter.

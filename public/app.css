@@ -1057,3 +1057,10 @@ kbd{display:inline-block;min-width:18px;padding:1px 5px;border:1px solid #d4dce6
 .pi-list{margin:10px 0 0;padding-left:18px;display:grid;gap:4px;font-size:13px}
 .pi-errors td:first-child{width:56px}
 @media(max-width:760px){.pi-steps{grid-template-columns:1fr}}
+
+/* Transactions: "select all matching" banner */
+.tx-select-banner{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;padding:10px 16px;background:var(--jsan-info-bg);border-bottom:1px solid #cfe0f5;font-size:13px;color:var(--jsan-text-primary);text-align:center}
+.tx-select-banner[hidden]{display:none}
+.tx-select-banner button{border:0;background:none;padding:2px 4px;font:inherit;font-weight:700;color:var(--jsan-primary);text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.tx-select-banner button:hover{color:var(--jsan-primary-hover)}
+.tx-bulkbar.is-all{background:linear-gradient(115deg,#003b7a,var(--jsan-primary))}
