@@ -661,6 +661,22 @@ openTransaction=async function(id){
       await renderPage();await openTransaction(tx.id);
     }catch(e){toast(e.message,true)}
   });
+  // Admins can delete a reviewer's work on this transaction: reviews and timed
+  // sessions are removed and it goes back to the reviewer's queue.
+  if(state.user.role==='ADMIN'&&(state.modal.sessions?.length||['IN_REVIEW','NEEDS_INFO','APPROVED','REJECTED'].includes(tx.status))){
+    document.querySelector('#review-notes')?.closest('.form-grid')?.insertAdjacentHTML('beforeend',`<div class="adm-danger"><div><b>Delete review work</b><span class="small muted"> · Removes the decision, notes and tracked time${tx.reviewer_name?` by ${esc(tx.reviewer_name)}`:''}. The transaction goes back to ${tx.reviewer_id?'their queue':'Unassigned'}.</span></div><button type="button" id="delete-review-work" class="btn btn-danger adm-btn-sm">Delete</button></div>`);
+    document.querySelector('#delete-review-work').addEventListener('click',async()=>{
+      const reason=prompt('Delete all review work on this transaction?\nThis cannot be undone; the audit trail keeps a copy.\n\nReason:');
+      if(reason===null)return;if(!reason.trim())return toast('A reason is required to delete review work',true);
+      try{
+        stopLocalTimer();
+        await api(`/api/transactions/${tx.id}/review-work`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:reason.trim()})});
+        document.querySelector('#tx-modal')?.remove();state.modal=null;
+        toast('Review work deleted. The transaction is back in the queue.');
+        await renderPage();await openTransaction(tx.id);
+      }catch(e){toast(e.message,true)}
+    });
+  }
   const final=['APPROVED','REJECTED'].includes(tx.status),max=Math.abs(Number(tx.amount)||0);
   sel.closest('.field').insertAdjacentHTML('afterend',`<div class="field" id="salary-deduction-field" hidden><label for="salary-deduction">Salary deduction${tx.currency?` (${esc(tx.currency)})`:''} <span class="muted">· optional</span></label><input id="salary-deduction" type="number" min="0" max="${max}" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(tx.salary_deduction_amount??'')}" ${final?'disabled':''}><small class="muted" id="salary-deduction-help">Amount the employee repays from salary, 0 to ${esc(fmtMoney(max,tx.currency))}. The rest stays under the classification above.</small></div>`);
   const box=document.querySelector('#salary-deduction-field'),input=document.querySelector('#salary-deduction'),amountEl=document.querySelector('#tx-modal .amount-big');

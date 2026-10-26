@@ -2286,6 +2286,35 @@ async function api(req,res,url){
       audit(id,user.id,'DECISION_REOPENED',{reason,previous_status:tx.status,previous_decision:tx.decision,previous_classification:tx.commercial_classification,previous_completed_at:tx.completed_at});
       return json(res,200,{ok:true,status});
     }
+    // Delete review work: admin only. Unlike reopen, the reviewer's review rows
+    // and timed work sessions are removed (so they leave productivity and
+    // reports), and the decision fields are cleared. The transaction goes back
+    // to its reviewer's queue. A reason is required; the audit entry keeps a
+    // snapshot of what was deleted.
+    const clearMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/review-work$/);
+    if(req.method==='DELETE'&&clearMatch){
+      const u=requireAuth(req,res,['ADMIN']);if(!u)return;
+      const id=Number(clearMatch[1]);const tx=rowTx(id);if(!tx)return json(res,404,{error:'Not found'});
+      const b=await readJson(req);const reason=clampText(b.reason,1000).trim();if(!reason)return json(res,400,{error:'A reason is required to delete review work'});
+      const reviews=db.prepare('SELECT id,user_id,decision,commercial_classification,project_code,notes,review_seconds,business_day,created_at,salary_deduction_amount FROM reviews WHERE transaction_id=?').all(id);
+      const sessions=db.prepare('SELECT COUNT(*) n,COALESCE(SUM(seconds),0) secs FROM work_sessions WHERE transaction_id=?').get(id);
+      if(!reviews.length&&!sessions.n&&!['IN_REVIEW','NEEDS_INFO','APPROVED','REJECTED'].includes(tx.status))return json(res,409,{error:'This transaction has no review work to delete'});
+      const t=iso(),status=tx.reviewer_id?'ASSIGNED':'UNASSIGNED';
+      db.exec('BEGIN');
+      try{
+        db.prepare('DELETE FROM reviews WHERE transaction_id=?').run(id);
+        db.prepare('DELETE FROM work_sessions WHERE transaction_id=?').run(id);
+        db.prepare('UPDATE transactions SET status=?,decision=NULL,commercial_classification=NULL,project_code=NULL,reviewer_notes=NULL,xpense_id=NULL,salary_deduction_amount=NULL,completed_at=NULL,completion_day=NULL,updated_at=? WHERE id=?').run(status,t,id);
+        // A category the reviewer typed in goes too (the next sync re-resolves it).
+        if(tx.category_resolution_source==='MANUAL_REVIEW')db.prepare('UPDATE transactions SET manual_category_name=NULL,resolved_category_name=NULL,category_resolution_source=NULL WHERE id=?').run(id);
+        // A reviewer-chosen project (MANUAL) falls back to what approved rules give.
+        if(tx.project_attribution_source==='MANUAL'){invalidateAttributionContext();const p=attributeProjectFromRules(tx,loadAttributionContext());db.prepare('UPDATE transactions SET project_id=?,project_attribution_source=?,project_attributed_at=?,project_attributed_by=?,project_mapping_rule_id=?,project_status=? WHERE id=?').run(p.project_id??null,p.project_attribution_source??null,p.project_attributed_at??null,p.project_attributed_by??null,p.project_mapping_rule_id??null,p.project_status,id);}
+        recalculateTransactionQuality(id);
+        audit(id,u.id,'REVIEW_WORK_DELETED',{reason,previous_status:tx.status,previous_decision:tx.decision,previous_classification:tx.commercial_classification,previous_project_code:tx.project_code,previous_notes:tx.reviewer_notes,previous_xpense_id:tx.xpense_id,previous_salary_deduction_amount:tx.salary_deduction_amount,previous_completed_at:tx.completed_at,previous_project:{project_id:tx.project_id,source:tx.project_attribution_source},previous_manual_category:tx.manual_category_name,reviewer_id:tx.reviewer_id,reviews,work_sessions_deleted:sessions.n,work_seconds_deleted:sessions.secs});
+        db.exec('COMMIT');
+      }catch(e){db.exec('ROLLBACK');throw e;}
+      return json(res,200,{ok:true,status,reviewsDeleted:reviews.length,sessionsDeleted:sessions.n});
+    }
     const hbMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/heartbeat$/);
     if(req.method==='POST'&&hbMatch){const id=Number(hbMatch[1]);const s=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? AND user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1').get(id,user.id);if(!s)return json(res,409,{error:'No active validation session'});db.prepare('UPDATE work_sessions SET last_heartbeat_at=? WHERE id=?').run(iso(),s.id);return json(res,200,{ok:true});}
     const pauseMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/pause$/);
