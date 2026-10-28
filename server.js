@@ -2141,6 +2141,63 @@ async function api(req,res,url){
         breakdowns:{spendByCategory,spendByProject,spendByMerchant,spendByCommercialType,spendTrend}
       });
     }
+    // Spend dashboard: totals, top spenders, categories and merchants for the
+    // chosen scope (everything, ?project=, ?owner=, or both), plus the
+    // per-project owner list for the sidebar. Only projects that synced
+    // transactions point at are listed (not the whole project register). Spending follows
+    // TX_SPENDING_SQL — billed amount, sign flipped so spend is positive —
+    // and every figure stays split by billing currency.
+    if(req.method==='GET'&&url.pathname==='/api/analytics/spend-dashboard'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD','FINANCE_QC']);if(!u)return;
+      const isDay=v=>/^\d{4}-\d{2}-\d{2}$/.test(v||'');
+      const from=isDay(url.searchParams.get('from'))?url.searchParams.get('from'):null,to=isDay(url.searchParams.get('to'))?url.searchParams.get('to'):null;
+      const args=[];let where=`WHERE ${TX_SPENDING_SQL}`;
+      if(from){where+=' AND date(t.transaction_date)>=date(?)';args.push(from);}
+      if(to){where+=' AND date(t.transaction_date)<=date(?)';args.push(to);}
+      const owner="COALESCE(NULLIF(t.employee_id,''),NULLIF(t.employee_email,''),NULLIF(t.employee_name,''),'UNKNOWN')";
+      const ownerCols="MAX(COALESCE(NULLIF(t.employee_name,''),NULLIF(t.employee_email,''),'Unknown owner')) name,MAX(t.employee_email) email";
+      const project='COALESCE(t.project_code,pj.code)',from_='FROM transactions t LEFT JOIN projects pj ON pj.id=t.project_id';
+      const category="COALESCE(NULLIF(t.resolved_category_name,''),NULLIF(t.category,''),'Uncategorised')";
+      // Optional scope: one project (code, or NO_PROJECT for unlinked spend)
+      // and/or one owner. The project list for the sidebar ignores the scope.
+      const scopeProject=url.searchParams.get('project')||null,scopeOwner=url.searchParams.get('owner')||null;
+      let sWhere=where;const sArgs=[...args];
+      if(scopeProject==='NO_PROJECT')sWhere+=` AND ${project} IS NULL`;else if(scopeProject){sWhere+=` AND ${project}=?`;sArgs.push(scopeProject);}
+      if(scopeOwner){sWhere+=` AND ${owner}=?`;sArgs.push(scopeOwner);}
+      const nums=rows=>rows.map(r=>({...r,count:Number(r.count),amount:Number(r.amount),...(r.owners!=null&&{owners:Number(r.owners)}),...(r.projects!=null&&{projects:Number(r.projects)})}));
+      const totalsFor=(w,a)=>nums(db.prepare(`SELECT t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,COUNT(DISTINCT ${owner}) owners,COUNT(DISTINCT ${project}) projects ${from_} ${w} GROUP BY t.bill_currency ORDER BY count DESC`).all(...a));
+      const totals=totalsFor(sWhere,sArgs);
+      // Whole-period totals, so a project or person can be shown as a share of everything.
+      const overall=scopeProject||scopeOwner?totalsFor(where,args):totals;
+      const topUsers=scopeOwner?[]:nums(db.prepare(`SELECT ${owner} owner_key,${ownerCols},t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,COUNT(DISTINCT ${project}) projects ${from_} ${sWhere} GROUP BY ${owner},t.bill_currency ORDER BY amount DESC LIMIT ${scopeProject?500:10}`).all(...sArgs));
+      const topCategories=nums(db.prepare(`SELECT ${category} category,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} GROUP BY ${category},t.bill_currency ORDER BY amount DESC LIMIT 10`).all(...sArgs));
+      const monthly=nums(db.prepare(`SELECT substr(t.transaction_date,1,7) AS month,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} AND t.transaction_date IS NOT NULL GROUP BY substr(t.transaction_date,1,7),t.bill_currency ORDER BY month`).all(...sArgs));
+      // Each listed person's biggest category within the scope.
+      if(topUsers.length){
+        const best=new Map();
+        for(const r of db.prepare(`SELECT ${owner} owner_key,${category} category,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} GROUP BY ${owner},${category}`).all(...sArgs)){const b=best.get(r.owner_key);if(!b||Number(r.amount)>b.amount)best.set(r.owner_key,{category:r.category,amount:Number(r.amount)});}
+        for(const u of topUsers)u.top_category=best.get(u.owner_key)?.category||null;
+      }
+      const topMerchants=nums(db.prepare(`SELECT COALESCE(NULLIF(t.merchant,''),'Unknown merchant') merchant,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} GROUP BY COALESCE(NULLIF(t.merchant,''),'Unknown merchant'),t.bill_currency ORDER BY amount DESC LIMIT 10`).all(...sArgs));
+      let owner_=null;
+      if(scopeOwner){
+        const who=db.prepare(`SELECT ${ownerCols} ${from_} WHERE ${owner}=?`).get(scopeOwner)||{};
+        const ownerArgs=[...args,scopeOwner],ownerWhere=`${where} AND ${owner}=?`;
+        owner_={owner_key:scopeOwner,name:who.name||'Unknown owner',email:who.email||null,
+          allProjects:totalsFor(ownerWhere,ownerArgs),
+          projects:nums(db.prepare(`SELECT ${project} code,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${ownerWhere} GROUP BY ${project},t.bill_currency ORDER BY amount DESC`).all(...ownerArgs)),
+          largest:nums(db.prepare(`SELECT t.id,t.transaction_date,t.merchant,${category} category,${project} code,t.bill_currency currency,1 count,-t.bill_amount amount ${from_} ${sWhere} ORDER BY -t.bill_amount DESC LIMIT 10`).all(...sArgs))};
+      }
+      const names=new Map(db.prepare('SELECT code,name FROM projects').all().map(p=>[p.code,p.name]));
+      const projectRows=db.prepare(`SELECT ${project} code,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${where} GROUP BY ${project},t.bill_currency ORDER BY amount DESC`).all(...args);
+      const ownerRows=db.prepare(`SELECT ${project} code,${owner} owner_key,${ownerCols},t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${where} GROUP BY ${project},${owner},t.bill_currency ORDER BY amount DESC`).all(...args);
+      const key=r=>`${r.code??''}\u0000${r.currency}`;
+      const projects=projectRows.map(r=>({code:r.code??null,name:r.code?(names.get(r.code)||r.code):'No project',currency:r.currency,count:Number(r.count),amount:Number(r.amount),owners:[]}));
+      const byKey=new Map(projects.map(p=>[key(p),p]));
+      for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
+      if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner},totals,overall,monthly,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+    }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and
     // "Elapsed TAT" (assigned_at -> completed_at wall-clock gap) are always

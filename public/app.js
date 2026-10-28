@@ -130,6 +130,7 @@ function sidebarIcon(name){
     'car-rentals':'<path d="m5 7 2-4h10l2 4 2 3v8H3v-8l2-3Zm0 0h14M3 12h18M6 16h2m8 0h2M5 18v3m14-3v3"/>',
     pleo:'<path d="M20 7a9 9 0 0 0-15-2L2 8m0-5v5h5M4 17a9 9 0 0 0 15 2l3-3m0 5v-5h-5"/>',
     expense:'<path d="M4 3v18h17M8 16v-5m5 5V7m5 9V4"/>',
+    spend:'<path d="M12 3a9 9 0 1 0 9 9h-9V3Z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15V3.5Z"/>',
     revops:'<path d="M9 4H5v17h14V4h-4M9 3h6v4H9zM8 12h8m-8 4h5"/>',
     team:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 5"/>',
     admin:'<path d="m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/>'
@@ -138,11 +139,11 @@ function sidebarIcon(name){
 }
 // Pleo Sync tab hidden for now (syncing still runs from Transactions and on schedule). Set to true to show it again.
 const SHOW_PLEO_SYNC_TAB=false;
-function navItems(){const a=[['dashboard','Overview'],['transactions',state.user.role==='REVIEWER'?'My Queue':'Transactions']];if(SHOW_PLEO_SYNC_TAB&&canManage())a.push(['pleo','Pleo Sync']);if(canSeeTeam())a.push(['expense','Expense Intelligence']);if(canSeeTeam())a.push(['revops','Review Operations']);if(canSeeTeam())a.push(['team','Team Performance']);if(canManage())a.push(['admin','Administration']);return a}
+function navItems(){const a=[['dashboard','Overview'],['transactions',state.user.role==='REVIEWER'?'My Queue':'Transactions']];if(SHOW_PLEO_SYNC_TAB&&canManage())a.push(['pleo','Pleo Sync']);if(canSeeTeam())a.push(['spend','Spend Dashboard']);if(canSeeTeam())a.push(['expense','Expense Intelligence']);if(canSeeTeam())a.push(['revops','Review Operations']);if(canSeeTeam())a.push(['team','Team Performance']);if(canManage())a.push(['admin','Administration']);return a}
 function renderShell(){const items=navItems();if(!items.some(([id])=>id===state.page))state.page='dashboard';try{sessionStorage.setItem('spendops.currentPage',state.page)}catch{}root.innerHTML=`<div class="shell"><aside class="sidebar"><div class="sidebar-branding"><div class="product-lockup"><h2 class="expensyra-brand"><img src="/assets/expensyra-logo-v1.png" alt="Expensyra" width="2172" height="724"></h2><div class="product">Expense Intelligence &amp; Validation</div></div></div><nav class="nav">${items.map(([id,l],i)=>`<button data-nav="${id}" data-index="${String(i+1).padStart(2,'0')}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="user-card"><div class="user-name">${esc(state.user.name)}</div><div class="user-role">${esc(state.user.role.replaceAll('_',' '))}</div><button id="logout" class="logout">Sign out →</button></div></aside><main class="main"><header class="topbar"><div class="topbar-left"><h1 id="page-title">Expensyra</h1></div><div class="topbar-brand-group"><div id="sync-mini" class="sync-mini"><span class="dot"></span><span>Pleo status</span></div><div class="topbar-jsan"><img src="/assets/jsan-logo-transparent.png" alt="JSAN" width="87" height="35"></div></div></header><section id="content" class="content"></section></main><nav class="mobile-nav">${items.slice(0,4).map(([id,l])=>`<button data-nav="${id}" class="${state.page===id?'active':''}">${sidebarIcon(id)}<span>${l.split(' ')[0]}</span></button>`).join('')}</nav></div>`;document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{closeModal(false);state.page=b.dataset.nav;state.revopsView='list';state.revopsReviewerId=null;renderShell();window.scrollTo(0,0)});document.querySelector('#logout').onclick=async()=>{await post('/api/auth/logout');state.user=null;renderLogin()};renderPage();updateSyncMini()}
 async function updateSyncMini(){const el=document.querySelector('#sync-mini');if(!el||!canSeeTeam())return;try{const p=await api('/api/pleo/status');el.innerHTML=`<span class="dot ${p.configured?'ok':'warn'}"></span><span>${p.configured?(p.latest?.status==='FAILED'?'Pleo sync needs attention':'Pleo connected'):'Pleo not configured'}</span>`}catch{}}
 function pageHead(title,sub,actions=''){document.querySelector('#page-title').textContent=title;return `<div class="page-head"><div class="page-head-copy"><div class="page-eyebrow">JSAN Expensyra / Internal Operations</div><h2>${esc(title)}</h2><p>${sub}</p></div>${actions?`<div class="actions">${actions}</div>`:''}</div>`}
-async function renderPage(){const c=document.querySelector('#content');if(!c)return;c.innerHTML=loadingMarkup();try{if(state.page==='dashboard')await renderDashboard(c);else if(state.page==='transactions')await renderTransactions(c);else if(state.page==='car-rentals')await renderCarRentals(c);else if(state.page==='pleo')await renderPleo(c);else if(state.page==='team')await renderTeam(c);else if(state.page==='expense')await renderExpense(c);else if(state.page==='revops')await renderRevops(c);else if(state.page==='admin')await renderAdmin(c)}catch(e){c.innerHTML=`<div class="notice danger">${esc(e.message)}</div>`}}
+async function renderPage(){const c=document.querySelector('#content');if(!c)return;c.innerHTML=loadingMarkup();try{if(state.page==='dashboard')await renderDashboard(c);else if(state.page==='transactions')await renderTransactions(c);else if(state.page==='car-rentals')await renderCarRentals(c);else if(state.page==='pleo')await renderPleo(c);else if(state.page==='team')await renderTeam(c);else if(state.page==='expense')await renderExpense(c);else if(state.page==='spend')await renderSpend(c);else if(state.page==='revops')await renderRevops(c);else if(state.page==='admin')await renderAdmin(c)}catch(e){c.innerHTML=`<div class="notice danger">${esc(e.message)}</div>`}}
 async function renderDashboard(c){
   const d=await api('/api/dashboard');if(state.page!=='dashboard')return;
   document.querySelector('#page-title').textContent='Overview';
@@ -720,6 +721,128 @@ function isPlaceholderValue(v){return['Category Unresolved','Missing Project','U
 function moneyList(rows){return rows.length?rows.map(r=>`<div>${esc(fmtMoney(r.amount,r.currency))}<span class="small muted"> · ${r.count} tx</span></div>`).join(''):'<div class="muted small">—</div>'}
 function breakdownPanel(title,rows,valueField,drillKey,colLabel){
   return `<div class="panel"><div class="panel-head"><h3>${esc(title)}</h3></div><div class="table-wrap"><table class="table"><thead><tr><th>${esc(colLabel)}</th><th>Currency</th><th class="right">Transactions</th><th class="right">Amount</th></tr></thead><tbody>${rows.length?rows.map(r=>{const v=r[valueField];const clickable=!isPlaceholderValue(v);return `<tr class="${clickable?'clickable':''}" ${clickable?`data-drill="${drillKey}" data-value="${esc(v)}"`:''}><td>${esc(v)}</td><td>${esc(r.currency)}</td><td class="right">${r.count}</td><td class="right money">${esc(fmtMoney(r.amount,r.currency))}</td></tr>`}).join(''):'<tr><td colspan="4"><div class="empty">No data for this filter.</div></td></tr>'}</tbody></table></div></div>`;
+}
+// Spend dashboard: a sidebar of the projects present in synced data; picking
+// one lists its owners (who spent). The main pane shows metrics for the
+// current scope: everything, one project, or one person (in a project or
+// across all of them). Selection, period and searches live in state.spend.
+const SD_OWNER_LIMIT=10;
+const SD_TINTS=[['#e8f1fd','#0050a9'],['#e7f6ef','#0f7a54'],['#fdf1e3','#8a4a00'],['#f1ecfd','#5b3fc0']];
+const SD_CAT_COLORS=['#0050a9','#38a3d1','#f0a43a','#7c5cd6','#d3dbe6'];
+const sdIcon={
+  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
+  layers:'<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>',
+  people:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
+  search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'
+};
+const sdSvg=(name,size=18)=>`<svg aria-hidden="true" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${sdIcon[name]}</svg>`;
+function sdTint(key){let h=0;for(const ch of String(key||''))h=(h*31+ch.charCodeAt(0))>>>0;return SD_TINTS[h%SD_TINTS.length]}
+function sdInitials(name){const p=String(name||'?').replace(/[^\p{L}\p{N} ]/gu,' ').trim().split(/\s+/).filter(Boolean);return ((p[0]?.[0]||'?')+(p.length>1?p[p.length-1][0]:'')).toUpperCase()}
+function sdAvatar(key,name,size=34){const [bg,ink]=sdTint(key);return `<span class="sdb-avatar" style="width:${size}px;height:${size}px;background:${bg};color:${ink}">${esc(sdInitials(name))}</span>`}
+function sdCompact(v,cur){const n=Number(v)||0,sym=(fmtMoney(0,cur).match(/^[^\d-]*/)||[''])[0];return n>=1e6?`${sym}${(n/1e6).toFixed(2)}M`:n>=1e3?`${sym}${Math.round(n/1e3)}k`:fmtMoney(n,cur)}
+// Monthly bar chart (last 12 months of the scope), peak month highlighted.
+// Plain HTML bars so labels stay crisp at any card width.
+function sdBarChart(rows,cur){
+  const data=rows.slice(-12);if(!data.length)return '<div class="empty">No spending in this period.</div>';
+  const max=Math.max(...data.map(r=>r.amount),1),peak=data.reduce((a,r)=>r.amount>a.amount?r:a,data[0]);
+  const multiYear=new Set(data.map(r=>r.month.slice(0,4))).size>1;
+  const label=m=>{const [y,mo]=m.split('-').map(Number);const s=new Date(y,mo-1,1).toLocaleString('en-GB',{month:'short'});return multiYear&&(mo===1||m===data[0].month)?`${s} ’${String(y).slice(2)}`:s};
+  return `<div class="sdb-bars" role="img" aria-label="Spend by month: ${esc(data.map(r=>`${label(r.month)} ${sdCompact(r.amount,cur)}`).join(', '))}">${data.map(r=>`<div class="sdb-bar-col${r===peak?' peak':''}" title="${esc(label(r.month))} ${r.month.slice(0,4)}: ${esc(fmtMoney(r.amount,cur))} · ${fmtCount(r.count)} tx"><span class="sdb-bar-val">${esc(sdCompact(r.amount,cur))}</span><span class="sdb-bar-fill" style="height:${Math.max(1.5,r.amount/max*100).toFixed(1)}%"></span><span class="sdb-bar-label">${esc(label(r.month))}</span></div>`).join('')}</div>`;
+}
+// Category donut: the top four plus everything else.
+function sdDonut(cats,total,cur){
+  const top=cats.slice(0,4),rest=Math.max(0,total-top.reduce((s,c)=>s+c.amount,0));
+  const parts=[...top.map(c=>({name:c.category,amount:c.amount})),...(rest>0.005?[{name:'Everything else',amount:rest}]:[])];
+  if(!parts.length||total<=0)return '<div class="empty">No spending in this period.</div>';
+  const C=2*Math.PI*64;let off=0;
+  const rings=parts.map((p,i)=>{const len=p.amount/total*C,s=`<circle cx="90" cy="90" r="64" stroke="${SD_CAT_COLORS[i]}" stroke-dasharray="${len.toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"/>`;off+=len;return s}).join('');
+  return `<div class="sdb-donut-wrap"><svg role="img" aria-label="${esc(parts.map(p=>`${p.name} ${Math.round(p.amount/total*100)}%`).join(', '))}" viewBox="0 0 180 180" class="sdb-donut"><g transform="rotate(-90 90 90)" fill="none" stroke-width="26">${rings}</g><text x="90" y="96" text-anchor="middle" class="sdb-donut-total">${esc(sdCompact(total,cur))}</text></svg>
+    <ul class="sdb-legend">${parts.map((p,i)=>`<li><span style="background:${SD_CAT_COLORS[i]}"></span><em>${esc(p.name)}</em><b>${Math.round(p.amount/total*100)}%</b></li>`).join('')}</ul></div>`;
+}
+async function renderSpend(c){
+  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,pq:'',oq:'',allPeople:false});
+  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);
+  const d=await api(`/api/analytics/spend-dashboard?${qs}`);if(state.page!=='spend')return;
+  const listScroll=c.querySelector('.sdb-list')?.scrollTop||0;
+  const all=d.overall[0]||{count:0,amount:0,owners:0,projects:0},cur=all.currency||'GBP',scope=d.totals[0]||{count:0,amount:0,owners:0,projects:0};
+  const money=(v,c=cur)=>esc(fmtMoney(Number(v)||0,c)),n=v=>fmtCount(Number(v)||0);
+  const share=(v,total)=>total>0?Math.max(0,Math.min(100,Number(v)/total*100)):0,pct=v=>`${v.toFixed(1)}%`;
+  const bar=p=>`<span class="sdb-bar"><i style="width:${p.toFixed(1)}%"></i></span>`;
+  const projKey=p=>p.code??'NO_PROJECT';
+  const projects=d.projects.filter(p=>p.currency===cur).sort((a,b)=>(a.code===null)-(b.code===null)||b.amount-a.amount);
+  const project=st.project?projects.find(p=>projKey(p)===st.project):null;
+  if(st.project&&!project){st.project=null;st.owner=null;return renderSpend(c)}
+  const ownerInfo=d.owner,isOwner=Boolean(st.owner&&ownerInfo),isProject=Boolean(project)&&!isOwner;
+  const monthly=d.monthly.filter(r=>r.currency===cur);
+  const peak=monthly.reduce((a,r)=>!a||r.amount>a.amount?r:a,null);
+  const peakNote=peak?`Peak ${esc(sdCompact(peak.amount,cur))} in ${esc(new Date(peak.month+'-01T00:00:00').toLocaleString('en-GB',{month:'long',year:'numeric'}))}`:'';
+  const iso=dt=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`,now=new Date();
+  const presets=[['month','This month',iso(new Date(now.getFullYear(),now.getMonth(),1))],['q','Last 3 months',iso(new Date(now.getFullYear(),now.getMonth()-2,1))],['h','Last 6 months',iso(new Date(now.getFullYear(),now.getMonth()-5,1))],['year','This year',`${now.getFullYear()}-01-01`],['all','All time','']];
+  const activePreset=st.custom?'custom':(presets.find(([,,f])=>f===st.from&&!st.to)?.[0]||'custom');
+  const whole=(v,c=cur)=>{try{return esc(new Intl.NumberFormat('en-GB',{style:'currency',currency:c,maximumFractionDigits:0}).format(Number(v)||0))}catch{return money(v,c)}};
+  const tile=(label,value,note,i)=>{const [bg,ink]=SD_TINTS[i];return `<article class="sdb-kpi" style="background:${bg}"><span>${label}</span><strong>${value}</strong><small style="color:${ink}">${note}</small></article>`};
+  const card=(title,note,body,cls='')=>`<section class="sdb-card ${cls}"><div class="sdb-card-head"><h3>${title}</h3>${note?`<span>${note}</span>`:''}</div>${body}</section>`;
+  const personRow=(r,i,base,showProjects)=>`<tr class="clickable" data-sd-owner="${esc(r.owner_key)}" tabindex="0"><td class="sdb-rank-col sd-hide-sm">${i+1}</td><td><div class="sdb-person">${sdAvatar(r.owner_key,r.name,32)}<div><b>${esc(r.name)}</b><small>${[r.email&&esc(r.email),showProjects&&`${n(r.projects)} project${r.projects===1?'':'s'}`].filter(Boolean).join(' · ')}</small></div></div></td><td class="sd-hide-sm sdb-cat" title="${esc(r.top_category||'')}">${esc(r.top_category||'—')}</td><td class="right sd-hide-sm">${n(r.count)}</td><td class="right money sdb-spend"><b>${money(r.amount,r.currency)}</b><small>${pct(share(r.amount,base))} of ${esc(sdCompact(base,cur))}</small></td></tr>`;
+  const peopleTable=(rows,base,showProjects)=>`<div class="table-wrap"><table class="table sdb-table"><thead><tr><th class="sd-hide-sm">#</th><th>Person</th><th class="sd-hide-sm">Top category</th><th class="right sd-hide-sm">Transactions</th><th class="right">Spend</th></tr></thead><tbody>${rows.map((r,i)=>personRow(r,i,base,showProjects)).join('')||'<tr><td colspan="7"><div class="empty">No spending in this period.</div></td></tr>'}</tbody></table></div>`;
+
+  // Sidebar: projects, or the people of the chosen project.
+  let side;
+  if(!project){
+    side=`<div class="sdb-side-head"><span class="sdb-kicker">Projects</span><b>${n(projects.length)} with spending</b></div>
+      <label class="sdb-search">${sdSvg('search',16)}<span class="sr-only">Search projects</span><input id="sd-q" type="search" placeholder="Search projects" value="${esc(st.pq)}"></label>
+      <div class="sdb-list"><button type="button" class="sdb-item ${!st.owner?'on':''}" data-sd-project=""><span class="sdb-icon on">${sdSvg('layers')}</span><span class="sdb-item-main"><b>All projects</b><small>${n(all.owners)} people · ${n(all.count)} tx</small></span><span class="sdb-item-amt">${money(all.amount)}</span></button>
+      ${projects.map(p=>`<button type="button" class="sdb-item" data-sd-project="${esc(projKey(p))}"><span class="sdb-icon ${p.code===null?'warn':''}">${sdSvg('folder')}</span><span class="sdb-item-main"><b>${esc(p.name)}</b><small>${p.code&&p.code!==p.name?`${esc(p.code)} · `:''}${n(p.owners.length)} people</small>${bar(share(p.amount,projects[0]?.amount||0))}</span><span class="sdb-item-amt">${money(p.amount)}</span></button>`).join('')}<div class="empty sdb-nomatch" hidden>No project matches.</div></div>`;
+  }else{
+    const top=project.owners[0]?.amount||0;
+    side=`<div class="sdb-side-head"><button type="button" class="sdb-back" data-sd-project="">‹ All projects</button>
+      <div class="sdb-proj-head"><span class="sdb-icon big ${project.code===null?'warn':''}">${sdSvg('folder',22)}</span><div><b>${esc(project.name)}</b><small>${money(project.amount)} · ${n(project.owners.length)} people</small></div></div></div>
+      <label class="sdb-search">${sdSvg('search',16)}<span class="sr-only">Search people in this project</span><input id="sd-q" type="search" placeholder="Search people" value="${esc(st.oq)}"></label>
+      <div class="sdb-list"><button type="button" class="sdb-item ${!st.owner?'on':''}" data-sd-owner=""><span class="sdb-icon on round">${sdSvg('people',16)}</span><span class="sdb-item-main"><b>All people</b><small>${n(project.count)} transactions</small></span><span class="sdb-item-amt">${money(project.amount)}</span></button>
+      ${project.owners.map(o=>`<button type="button" class="sdb-item ${st.owner===o.owner_key?'on':''}" data-sd-owner="${esc(o.owner_key)}">${sdAvatar(o.owner_key,o.name)}<span class="sdb-item-main"><b>${esc(o.name)}</b>${bar(share(o.amount,top))}</span><span class="sdb-item-amt">${money(o.amount)}</span></button>`).join('')}<div class="empty sdb-nomatch" hidden>No one matches.</div></div>`;
+  }
+
+  // Main pane for the current scope.
+  const crumbs=[`<button type="button" data-sd-project="">All projects</button>`];
+  if(project)crumbs.push(isOwner?`<button type="button" data-sd-owner="">${esc(project.name)}</button>`:`<b>${esc(project.name)}</b>`);
+  if(isOwner)crumbs.push(`<b>${esc(ownerInfo.name)}</b>`);
+  const charts=(title)=>`<div class="sdb-row">${card(title,peakNote,sdBarChart(monthly,cur),'sdb-grow3')}${card('Categories','',sdDonut(d.topCategories.filter(r=>r.currency===cur),scope.amount,cur),'sdb-grow2')}</div>`;
+  let head='',main;
+  if(isOwner){
+    const everywhere=ownerInfo.allProjects.find(r=>r.currency===cur)||{amount:0,count:0},base=project?project.amount:all.amount,np=ownerInfo.projects.length;
+    head=`<div class="sdb-scope">${sdAvatar(ownerInfo.owner_key,ownerInfo.name,52)}<div><span class="sdb-kicker">${project?'Person in this project':'Person · all projects'}</span><h3>${esc(ownerInfo.name)}</h3>${ownerInfo.email?`<p>${esc(ownerInfo.email)}</p>`:''}</div></div>`;
+    main=`<section class="sdb-kpis">${tile('Total spend',whole(scope.amount),project?`In ${esc(project.name)}`:'Across all projects',0)}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1)}${tile(project?'Share of project':'Share of all spend',pct(share(scope.amount,base)),`of ${money(base)}`,2)}${project?tile('All projects',whole(everywhere.amount),`${n(everywhere.count)} tx in ${n(np)} project${np===1?'':'s'}`,3):tile('Projects',n(np),'With spending',3)}</section>
+      ${charts('Monthly spend')}
+      <div class="sdb-row">${card('Top merchants','Where it was spent',`<ol class="sdb-rank">${d.topMerchants.map((r,i)=>`<li><span class="sdb-pos">${i+1}</span><div><b>${esc(r.merchant)}</b><small>${n(r.count)} tx · ${pct(share(r.amount,scope.amount))}</small>${bar(share(r.amount,d.topMerchants[0]?.amount||0))}</div><b class="sdb-amt">${money(r.amount,r.currency)}</b></li>`).join('')||'<li class="empty">No spending in this period.</li>'}</ol>`,'sdb-grow2')}
+      ${card('Largest transactions','Click one to open it',`<div class="table-wrap"><table class="table sdb-table"><thead><tr><th>Date</th><th>Merchant</th>${project?'':'<th class="sd-hide-sm">Project</th>'}<th class="right">Amount</th></tr></thead><tbody>${ownerInfo.largest.map(t=>`<tr class="clickable" data-sd-tx="${t.id}" tabindex="0"><td class="sdb-nowrap">${esc(t.transaction_date?new Date(t.transaction_date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'2-digit'}):'—')}</td><td class="sdb-ell sdb-merchant" title="${esc(`${t.merchant||''} · ${t.category}`)}"><b>${esc(t.merchant||'Unknown merchant')}</b><small>${esc(t.category)}</small></td>${project?'':`<td class="sd-hide-sm sdb-nowrap">${esc(t.code||'No project')}</td>`}<td class="right money"><b>${money(t.amount,t.currency)}</b></td></tr>`).join('')||'<tr><td colspan="5"><div class="empty">No transactions.</div></td></tr>'}</tbody></table></div>`,'sdb-grow3')}</div>
+      ${project?'':card('Projects','Click one to see this person there',`<ol class="sdb-rank">${ownerInfo.projects.map((r,i)=>`<li class="clickable" data-sd-project="${esc(r.code??'NO_PROJECT')}" data-sd-keep-owner="1" tabindex="0"><span class="sdb-pos">${i+1}</span><div><b>${esc(r.name)}</b><small>${n(r.count)} tx · ${pct(share(r.amount,scope.amount))}</small>${bar(share(r.amount,ownerInfo.projects[0]?.amount||0))}</div><b class="sdb-amt">${money(r.amount,r.currency)}</b></li>`).join('')}</ol>`)}`;
+  }else if(isProject){
+    const people=st.allPeople?d.topUsers:d.topUsers.slice(0,SD_OWNER_LIMIT);
+    main=`<section class="sdb-kpis">${tile('Project spend',whole(scope.amount),`${pct(share(scope.amount,all.amount))} of all spend`,0)}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1)}${tile('People spending',n(scope.owners),'Who made transactions',2)}${tile('Per person',whole(scope.owners?scope.amount/scope.owners:0),'Average spend',3)}</section>
+      ${charts('Monthly spend')}
+      ${card('Spending by person',d.topUsers.length>SD_OWNER_LIMIT?`<button type="button" class="sdb-link" data-sd-allpeople>${st.allPeople?`Show top ${SD_OWNER_LIMIT}`:`Show all ${n(d.topUsers.length)} →`}</button>`:'',peopleTable(people,scope.amount,false),'sdb-flush')}`;
+  }else{
+    main=`<section class="sdb-kpis">${tile('Total spend',whole(all.amount),`Billed in ${esc(cur)}${d.overall.length>1?` · plus ${d.overall.slice(1).map(o=>money(o.amount,o.currency)).join(', ')}`:''}`,0)}${tile('Transactions',n(all.count),`Average ${money(all.count?all.amount/all.count:0)}`,1)}${tile('People spending',n(all.owners),'Card holders and claimants',2)}${tile('Projects',n(all.projects),projects.some(p=>p.code===null)?`Plus ${money(projects.find(p=>p.code===null).amount)} not linked`:'With synced spending',3)}</section>
+      ${charts('Monthly spend')}
+      ${card('Top 10 spenders','Click a person for details',peopleTable(d.topUsers,all.amount,true),'sdb-flush')}`;
+  }
+
+  c.innerHTML=pageHead('Spend dashboard','Where the money goes, by project and by person, from transactions synced from Pleo.')+`<div class="sdb-toolbar"><div class="sdb-period" role="group" aria-label="Period">${presets.map(([id,l,f])=>`<button type="button" class="${activePreset===id?'on':''}" aria-pressed="${activePreset===id}" data-sd-from="${f}">${l}</button>`).join('')}<button type="button" class="${activePreset==='custom'?'on':''}" aria-pressed="${activePreset==='custom'}" data-sd-custom>Custom</button></div>
+  ${activePreset==='custom'?`<form id="sd-range" class="sdb-range"><label>From<input type="date" name="from" value="${esc(st.from)}"></label><label>To<input type="date" name="to" value="${esc(st.to)}"></label><button class="btn btn-primary">Apply</button></form>`:''}</div>
+  <div class="sdb-layout"><aside class="sdb-side sdb-card" aria-label="${project?'People in this project':'Projects'}">${side}</aside><div class="sdb-main"><nav class="sdb-crumbs" aria-label="Selection">${crumbs.join('<span aria-hidden="true">›</span>')}</nav>${head}${main}</div></div>`;
+
+  const go=()=>{c.querySelector('.sdb-layout')?.classList.add('sdb-busy');return renderSpend(c).catch(e=>toast(e.message,true))};
+  const enter=el=>{el.onkeydown=e=>{if(e.key==='Enter'&&e.target===el)el.click()}};
+  c.querySelectorAll('[data-sd-project]').forEach(b=>{b.onclick=()=>{if(!b.dataset.sdKeepOwner)st.owner=null;st.project=b.dataset.sdProject||null;st.oq='';st.allPeople=false;go()};if(b.tagName==='LI')enter(b)});
+  c.querySelectorAll('[data-sd-owner]').forEach(b=>{b.onclick=()=>{st.owner=b.dataset.sdOwner||null;go()};if(b.tagName==='TR')enter(b)});
+  c.querySelectorAll('[data-sd-tx]').forEach(r=>{r.onclick=()=>openTransaction(Number(r.dataset.sdTx));enter(r)});
+  c.querySelector('[data-sd-allpeople]')?.addEventListener('click',()=>{st.allPeople=!st.allPeople;go()});
+  // Sidebar search filters the list in place (no refetch). The first item ("All …") always stays.
+  const q=c.querySelector('#sd-q'),filter=()=>{const term=q.value.trim().toLowerCase();let shown=0;c.querySelectorAll('.sdb-list .sdb-item').forEach((it,i)=>{if(i===0)return;it.hidden=Boolean(term)&&!it.textContent.toLowerCase().includes(term);if(!it.hidden)shown++});c.querySelector('.sdb-nomatch').hidden=shown>0};
+  q.oninput=()=>{if(project)st.oq=q.value;else st.pq=q.value;filter()};filter();
+  const list=c.querySelector('.sdb-list');if(list)list.scrollTop=listScroll;
+  c.querySelectorAll('[data-sd-from]').forEach(b=>b.onclick=()=>{st.from=b.dataset.sdFrom;st.to='';st.custom=false;go()});
+  c.querySelector('[data-sd-custom]').onclick=()=>{st.custom=true;go()};
+  c.querySelector('#sd-range')?.addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);const from=f.get('from')||'',to=f.get('to')||'';if(from&&to&&from>to)return toast('“From” must be on or before “To”',true);st.from=from;st.to=to;go()});
 }
 function renderMonthlyPivot(rows){
   if(!rows.length) return '<div class="panel"><div class="panel-head"><h3>Spend by category × month</h3></div><div class="panel-body"><div class="empty">No dated transactions yet.</div></div></div>';
