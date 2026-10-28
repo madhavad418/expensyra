@@ -2160,6 +2160,9 @@ async function api(req,res,url){
       const category="COALESCE(NULLIF(t.resolved_category_name,''),NULLIF(t.category,''),'Uncategorised')";
       // Optional scope: one project (code, or NO_PROJECT for unlinked spend)
       // and/or one owner. The project list for the sidebar ignores the scope.
+      // A category filter narrows everything, sidebar included, like the period does.
+      const scopeCategory=url.searchParams.get('category')||null;
+      if(scopeCategory){where+=` AND ${category}=?`;args.push(scopeCategory);}
       const scopeProject=url.searchParams.get('project')||null,scopeOwner=url.searchParams.get('owner')||null;
       let sWhere=where;const sArgs=[...args];
       if(scopeProject==='NO_PROJECT')sWhere+=` AND ${project} IS NULL`;else if(scopeProject){sWhere+=` AND ${project}=?`;sArgs.push(scopeProject);}
@@ -2172,6 +2175,7 @@ async function api(req,res,url){
       const topUsers=scopeOwner?[]:nums(db.prepare(`SELECT ${owner} owner_key,${ownerCols},t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,COUNT(DISTINCT ${project}) projects ${from_} ${sWhere} GROUP BY ${owner},t.bill_currency ORDER BY amount DESC LIMIT ${scopeProject?500:10}`).all(...sArgs));
       const topCategories=nums(db.prepare(`SELECT ${category} category,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} GROUP BY ${category},t.bill_currency ORDER BY amount DESC LIMIT 10`).all(...sArgs));
       const monthly=nums(db.prepare(`SELECT substr(t.transaction_date,1,7) AS month,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} AND t.transaction_date IS NOT NULL GROUP BY substr(t.transaction_date,1,7),t.bill_currency ORDER BY month`).all(...sArgs));
+      const daily=nums(db.prepare(`SELECT substr(t.transaction_date,1,10) AS day,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} AND t.transaction_date IS NOT NULL GROUP BY substr(t.transaction_date,1,10),t.bill_currency ORDER BY day`).all(...sArgs));
       // Each listed person's biggest category within the scope.
       if(topUsers.length){
         const best=new Map();
@@ -2196,7 +2200,7 @@ async function api(req,res,url){
       const byKey=new Map(projects.map(p=>[key(p),p]));
       for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
       if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
-      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner},totals,overall,monthly,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory},totals,overall,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
     }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and

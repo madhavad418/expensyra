@@ -740,28 +740,54 @@ function sdTint(key){let h=0;for(const ch of String(key||''))h=(h*31+ch.charCode
 function sdInitials(name){const p=String(name||'?').replace(/[^\p{L}\p{N} ]/gu,' ').trim().split(/\s+/).filter(Boolean);return ((p[0]?.[0]||'?')+(p.length>1?p[p.length-1][0]:'')).toUpperCase()}
 function sdAvatar(key,name,size=34){const [bg,ink]=sdTint(key);return `<span class="sdb-avatar" style="width:${size}px;height:${size}px;background:${bg};color:${ink}">${esc(sdInitials(name))}</span>`}
 function sdCompact(v,cur){const n=Number(v)||0,sym=(fmtMoney(0,cur).match(/^[^\d-]*/)||[''])[0];return n>=1e6?`${sym}${(n/1e6).toFixed(2)}M`:n>=1e3?`${sym}${Math.round(n/1e3)}k`:fmtMoney(n,cur)}
-// Monthly bar chart (last 12 months of the scope), peak month highlighted.
-// Plain HTML bars so labels stay crisp at any card width.
-function sdBarChart(rows,cur){
-  const data=rows.slice(-12);if(!data.length)return '<div class="empty">No spending in this period.</div>';
-  const max=Math.max(...data.map(r=>r.amount),1),peak=data.reduce((a,r)=>r.amount>a.amount?r:a,data[0]);
-  const multiYear=new Set(data.map(r=>r.month.slice(0,4))).size>1;
-  const label=m=>{const [y,mo]=m.split('-').map(Number);const s=new Date(y,mo-1,1).toLocaleString('en-GB',{month:'short'});return multiYear&&(mo===1||m===data[0].month)?`${s} ’${String(y).slice(2)}`:s};
-  return `<div class="sdb-bars" role="img" aria-label="Spend by month: ${esc(data.map(r=>`${label(r.month)} ${sdCompact(r.amount,cur)}`).join(', '))}">${data.map(r=>`<div class="sdb-bar-col${r===peak?' peak':''}" title="${esc(label(r.month))} ${r.month.slice(0,4)}: ${esc(fmtMoney(r.amount,cur))} · ${fmtCount(r.count)} tx"><span class="sdb-bar-val">${esc(sdCompact(r.amount,cur))}</span><span class="sdb-bar-fill" style="height:${Math.max(1.5,r.amount/max*100).toFixed(1)}%"></span><span class="sdb-bar-label">${esc(label(r.month))}</span></div>`).join('')}</div>`;
+const sdReduceMotion=()=>{try{return matchMedia('(prefers-reduced-motion: reduce)').matches}catch{return false}};
+const sdIsoDay=dt=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+// Time buckets for the spend chart: days, weeks (Mon–Sun) or months, with
+// empty days/weeks filled in so the bars read as a continuous timeline.
+function sdBuckets(d,cur,gran){
+  if(gran==='month')return d.monthly.filter(r=>r.currency===cur).slice(-12).map(r=>{const [y,m]=r.month.split('-').map(Number),first=new Date(y,m-1,1),last=new Date(y,m,0);return {from:sdIsoDay(first),to:sdIsoDay(last),short:first.toLocaleString('en-GB',{month:'short'})+(m===1?` ’${String(y).slice(2)}`:''),long:first.toLocaleString('en-GB',{month:'long',year:'numeric'}),amount:r.amount,count:r.count}});
+  const days=d.daily.filter(r=>r.currency===cur&&/^\d{4}-\d{2}-\d{2}$/.test(r.day));if(!days.length)return [];
+  const byDay=new Map(days.map(r=>[r.day,r])),start=new Date(days[0].day+'T00:00:00'),end=new Date(days[days.length-1].day+'T00:00:00');
+  if(gran==='day'){const out=[];for(let dt=new Date(start);dt<=end;dt.setDate(dt.getDate()+1)){const k=sdIsoDay(dt),r=byDay.get(k);out.push({from:k,to:k,short:dt.getDate()===1||!out.length?dt.toLocaleDateString('en-GB',{day:'numeric',month:'short'}):String(dt.getDate()),long:dt.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'long',year:'numeric'}),amount:r?.amount||0,count:r?.count||0})}return out.slice(-62)}
+  const monday=dt=>{const m=new Date(dt);m.setDate(m.getDate()-((m.getDay()+6)%7));return m};
+  const out=[];for(let wk=monday(start);wk<=end;wk.setDate(wk.getDate()+7)){const sun=new Date(wk);sun.setDate(sun.getDate()+6);let amount=0,count=0;for(let dt=new Date(wk);dt<=sun;dt.setDate(dt.getDate()+1)){const r=byDay.get(sdIsoDay(dt));if(r){amount+=r.amount;count+=r.count}}out.push({from:sdIsoDay(wk),to:sdIsoDay(sun),short:wk.toLocaleDateString('en-GB',{day:'numeric',month:'short'}),long:`Week of ${wk.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}`,amount,count})}
+  return out.slice(-26);
 }
-// Category donut: the top four plus everything else.
+// Spend chart: bars grow in, an average line, a hover/focus tooltip, and a
+// click narrows the dashboard to that bar's period.
+function sdTimeChart(buckets,cur){
+  if(!buckets.length)return '<div class="empty">No spending in this period.</div>';
+  const max=Math.max(...buckets.map(b=>b.amount),1),avg=buckets.reduce((s,b)=>s+b.amount,0)/buckets.length,peak=buckets.reduce((a,b)=>b.amount>a.amount?b:a,buckets[0]);
+  const n=buckets.length,every=Math.max(1,Math.ceil(n/8)),delay=Math.min(28,600/n),gap=n>40?2:n>20?4:n>10?8:14;
+  return `<div class="sdb-chart" style="--gap:${gap}px">
+    <div class="sdb-plot"><div class="sdb-avg" style="bottom:${(avg/max*100).toFixed(1)}%"><span>avg ${esc(sdCompact(avg,cur))}</span></div>
+      <div class="sdb-cols">${buckets.map((b,i)=>`<button type="button" class="sdb-col${b===peak?' peak':''}" data-i="${i}" style="--h:${Math.max(b.amount>0?1.5:0,b.amount/max*100).toFixed(1)}%;--d:${Math.round(i*delay)}ms" aria-label="${esc(`${b.long}: ${fmtMoney(b.amount,cur)}, ${fmtCount(b.count)} transactions. Select to focus on this period.`)}"><span class="sdb-fill"></span>${b===peak?`<span class="sdb-peak-val">${esc(sdCompact(b.amount,cur))}</span>`:''}</button>`).join('')}</div></div>
+    <div class="sdb-xrow" aria-hidden="true">${buckets.map((b,i)=>`<span>${i%every===0?esc(b.short):''}</span>`).join('')}</div>
+    <div class="sdb-tip" role="status" aria-live="polite"></div></div>`;
+}
+// Category donut: the top four plus everything else; segments sweep in, and
+// hovering a segment or legend row shows it in the centre.
 function sdDonut(cats,total,cur){
   const top=cats.slice(0,4),rest=Math.max(0,total-top.reduce((s,c)=>s+c.amount,0));
-  const parts=[...top.map(c=>({name:c.category,amount:c.amount})),...(rest>0.005?[{name:'Everything else',amount:rest}]:[])];
+  const parts=[...top.map(c=>({name:c.category,amount:c.amount,real:true})),...(rest>0.005?[{name:'Everything else',amount:rest,real:false}]:[])];
   if(!parts.length||total<=0)return '<div class="empty">No spending in this period.</div>';
   const C=2*Math.PI*64;let off=0;
-  const rings=parts.map((p,i)=>{const len=p.amount/total*C,s=`<circle cx="90" cy="90" r="64" stroke="${SD_CAT_COLORS[i]}" stroke-dasharray="${len.toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"/>`;off+=len;return s}).join('');
-  return `<div class="sdb-donut-wrap"><svg role="img" aria-label="${esc(parts.map(p=>`${p.name} ${Math.round(p.amount/total*100)}%`).join(', '))}" viewBox="0 0 180 180" class="sdb-donut"><g transform="rotate(-90 90 90)" fill="none" stroke-width="26">${rings}</g><text x="90" y="96" text-anchor="middle" class="sdb-donut-total">${esc(sdCompact(total,cur))}</text></svg>
-    <ul class="sdb-legend">${parts.map((p,i)=>`<li><span style="background:${SD_CAT_COLORS[i]}"></span><em>${esc(p.name)}</em><b>${Math.round(p.amount/total*100)}%</b></li>`).join('')}</ul></div>`;
+  const rings=parts.map((p,i)=>{const len=p.amount/total*C,s=`<circle class="sdb-seg" data-i="${i}" cx="90" cy="90" r="64" stroke="${SD_CAT_COLORS[i]}" data-len="${len.toFixed(2)}" stroke-dasharray="0 ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" style="--d:${i*110}ms"/>`;off+=len;return s}).join('');
+  return `<div class="sdb-donut-wrap" data-total="${esc(sdCompact(total,cur))}" data-c="${C.toFixed(2)}"><svg role="img" aria-label="${esc(parts.map(p=>`${p.name} ${Math.round(p.amount/total*100)}%`).join(', '))}" viewBox="0 0 180 180" class="sdb-donut"><g transform="rotate(-90 90 90)" fill="none" stroke-width="26">${rings}</g><text x="90" y="88" text-anchor="middle" class="sdb-donut-total">${esc(sdCompact(total,cur))}</text><text x="90" y="108" text-anchor="middle" class="sdb-donut-sub">total spend</text></svg>
+    <ul class="sdb-legend">${parts.map((p,i)=>`<li><button type="button" data-i="${i}" ${p.real?`data-sd-category="${esc(p.name)}" title="Show only ${esc(p.name)}"`:'disabled'} data-name="${esc(p.name)}" data-amt="${esc(sdCompact(p.amount,cur))}" data-pct="${Math.round(p.amount/total*100)}%"><span style="background:${SD_CAT_COLORS[i]}"></span><em>${esc(p.name)}</em><b>${Math.round(p.amount/total*100)}%</b></button></li>`).join('')}</ul></div>`;
+}
+// Count tile numbers up from zero once they are on screen.
+function sdCountUp(root){
+  const els=[...root.querySelectorAll('[data-count]')];if(!els.length)return;
+  const fmt=(el,v)=>{const k=el.dataset.fmt,cur=el.dataset.cur||'GBP';if(k==='count')return fmtCount(Math.round(v));if(k==='pct')return `${v.toFixed(1)}%`;try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:cur,maximumFractionDigits:0}).format(v)}catch{return fmtMoney(v,cur)}};
+  if(sdReduceMotion())return;
+  const t0=performance.now(),dur=900;
+  const step=now=>{const p=Math.min(1,(now-t0)/dur),e=1-Math.pow(1-p,3);for(const el of els)el.textContent=fmt(el,Number(el.dataset.count)*e);if(p<1)requestAnimationFrame(step)};
+  for(const el of els)el.textContent=fmt(el,0);requestAnimationFrame(step);
 }
 async function renderSpend(c){
-  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,pq:'',oq:'',allPeople:false});
-  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);
+  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,category:null,gran:'auto',pq:'',oq:'',allPeople:false});
+  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);if(st.category)qs.set('category',st.category);
   const d=await api(`/api/analytics/spend-dashboard?${qs}`);if(state.page!=='spend')return;
   const listScroll=c.querySelector('.sdb-list')?.scrollTop||0;
   const all=d.overall[0]||{count:0,amount:0,owners:0,projects:0},cur=all.currency||'GBP',scope=d.totals[0]||{count:0,amount:0,owners:0,projects:0};
@@ -773,14 +799,15 @@ async function renderSpend(c){
   const project=st.project?projects.find(p=>projKey(p)===st.project):null;
   if(st.project&&!project){st.project=null;st.owner=null;return renderSpend(c)}
   const ownerInfo=d.owner,isOwner=Boolean(st.owner&&ownerInfo),isProject=Boolean(project)&&!isOwner;
-  const monthly=d.monthly.filter(r=>r.currency===cur);
-  const peak=monthly.reduce((a,r)=>!a||r.amount>a.amount?r:a,null);
-  const peakNote=peak?`Peak ${esc(sdCompact(peak.amount,cur))} in ${esc(new Date(peak.month+'-01T00:00:00').toLocaleString('en-GB',{month:'long',year:'numeric'}))}`:'';
+  // Chart granularity: "auto" picks months for long ranges, days for short ones.
+  const dayCount=d.daily.filter(r=>r.currency===cur).length,monthCount=d.monthly.filter(r=>r.currency===cur).length;
+  const gran=st.gran!=='auto'?st.gran:monthCount>=4?'month':dayCount<=62?'day':'week';
   const iso=dt=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`,now=new Date();
   const presets=[['month','This month',iso(new Date(now.getFullYear(),now.getMonth(),1))],['q','Last 3 months',iso(new Date(now.getFullYear(),now.getMonth()-2,1))],['h','Last 6 months',iso(new Date(now.getFullYear(),now.getMonth()-5,1))],['year','This year',`${now.getFullYear()}-01-01`],['all','All time','']];
   const activePreset=st.custom?'custom':(presets.find(([,,f])=>f===st.from&&!st.to)?.[0]||'custom');
   const whole=(v,c=cur)=>{try{return esc(new Intl.NumberFormat('en-GB',{style:'currency',currency:c,maximumFractionDigits:0}).format(Number(v)||0))}catch{return money(v,c)}};
-  const tile=(label,value,note,i)=>{const [bg,ink]=SD_TINTS[i];return `<article class="sdb-kpi" style="background:${bg}"><span>${label}</span><strong>${value}</strong><small style="color:${ink}">${note}</small></article>`};
+  // raw/fmt let the number count up from zero after render (sdCountUp).
+  const tile=(label,value,note,i,raw,fmt)=>{const [bg,ink]=SD_TINTS[i];return `<article class="sdb-kpi" style="background:${bg};--d:${i*70}ms"><span>${label}</span><strong${raw!=null?` data-count="${Number(raw)||0}" data-fmt="${fmt}" data-cur="${esc(cur)}"`:''}>${value}</strong><small style="color:${ink}">${note}</small></article>`};
   const card=(title,note,body,cls='')=>`<section class="sdb-card ${cls}"><div class="sdb-card-head"><h3>${title}</h3>${note?`<span>${note}</span>`:''}</div>${body}</section>`;
   const personRow=(r,i,base,showProjects)=>`<tr class="clickable" data-sd-owner="${esc(r.owner_key)}" tabindex="0"><td class="sdb-rank-col sd-hide-sm">${i+1}</td><td><div class="sdb-person">${sdAvatar(r.owner_key,r.name,32)}<div><b>${esc(r.name)}</b><small>${[r.email&&esc(r.email),showProjects&&`${n(r.projects)} project${r.projects===1?'':'s'}`].filter(Boolean).join(' · ')}</small></div></div></td><td class="sd-hide-sm sdb-cat" title="${esc(r.top_category||'')}">${esc(r.top_category||'—')}</td><td class="right sd-hide-sm">${n(r.count)}</td><td class="right money sdb-spend"><b>${money(r.amount,r.currency)}</b><small>${pct(share(r.amount,base))} of ${esc(sdCompact(base,cur))}</small></td></tr>`;
   const peopleTable=(rows,base,showProjects)=>`<div class="table-wrap"><table class="table sdb-table"><thead><tr><th class="sd-hide-sm">#</th><th>Person</th><th class="sd-hide-sm">Top category</th><th class="right sd-hide-sm">Transactions</th><th class="right">Spend</th></tr></thead><tbody>${rows.map((r,i)=>personRow(r,i,base,showProjects)).join('')||'<tr><td colspan="7"><div class="empty">No spending in this period.</div></td></tr>'}</tbody></table></div>`;
@@ -805,32 +832,68 @@ async function renderSpend(c){
   const crumbs=[`<button type="button" data-sd-project="">All projects</button>`];
   if(project)crumbs.push(isOwner?`<button type="button" data-sd-owner="">${esc(project.name)}</button>`:`<b>${esc(project.name)}</b>`);
   if(isOwner)crumbs.push(`<b>${esc(ownerInfo.name)}</b>`);
-  const charts=(title)=>`<div class="sdb-row">${card(title,peakNote,sdBarChart(monthly,cur),'sdb-grow3')}${card('Categories','',sdDonut(d.topCategories.filter(r=>r.currency===cur),scope.amount,cur),'sdb-grow2')}</div>`;
+  const catChip=st.category?`<span class="sdb-chip">Category: <b>${esc(st.category)}</b><button type="button" data-sd-clear-category aria-label="Remove category filter">×</button></span>`:'';
+  const granToggle=`<div class="sdb-gran" role="group" aria-label="Chart detail">${[['day','Daily'],['week','Weekly'],['month','Monthly']].map(([g,l])=>`<button type="button" data-sd-gran="${g}" aria-pressed="${gran===g}" class="${gran===g?'on':''}">${l}</button>`).join('')}</div>`;
+  const charts=title=>`<div class="sdb-row">${card(title,granToggle,`<p class="sdb-peak-note"></p><div id="sd-chart"></div>`,'sdb-grow3 sdb-chart-card')}${card('Categories',st.category?'':'Click one to filter',sdDonut(d.topCategories.filter(r=>r.currency===cur),scope.amount,cur),'sdb-grow2')}</div>`;
   let head='',main;
   if(isOwner){
     const everywhere=ownerInfo.allProjects.find(r=>r.currency===cur)||{amount:0,count:0},base=project?project.amount:all.amount,np=ownerInfo.projects.length;
     head=`<div class="sdb-scope">${sdAvatar(ownerInfo.owner_key,ownerInfo.name,52)}<div><span class="sdb-kicker">${project?'Person in this project':'Person · all projects'}</span><h3>${esc(ownerInfo.name)}</h3>${ownerInfo.email?`<p>${esc(ownerInfo.email)}</p>`:''}</div></div>`;
-    main=`<section class="sdb-kpis">${tile('Total spend',whole(scope.amount),project?`In ${esc(project.name)}`:'Across all projects',0)}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1)}${tile(project?'Share of project':'Share of all spend',pct(share(scope.amount,base)),`of ${money(base)}`,2)}${project?tile('All projects',whole(everywhere.amount),`${n(everywhere.count)} tx in ${n(np)} project${np===1?'':'s'}`,3):tile('Projects',n(np),'With spending',3)}</section>
-      ${charts('Monthly spend')}
+    main=`<section class="sdb-kpis">${tile('Total spend',whole(scope.amount),project?`In ${esc(project.name)}`:'Across all projects',0,scope.amount,'money')}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1,scope.count,'count')}${tile(project?'Share of project':'Share of all spend',pct(share(scope.amount,base)),`of ${money(base)}`,2,share(scope.amount,base),'pct')}${project?tile('All projects',whole(everywhere.amount),`${n(everywhere.count)} tx in ${n(np)} project${np===1?'':'s'}`,3,everywhere.amount,'money'):tile('Projects',n(np),'With spending',3,np,'count')}</section>
+      ${charts('Spend over time')}
       <div class="sdb-row">${card('Top merchants','Where it was spent',`<ol class="sdb-rank">${d.topMerchants.map((r,i)=>`<li><span class="sdb-pos">${i+1}</span><div><b>${esc(r.merchant)}</b><small>${n(r.count)} tx · ${pct(share(r.amount,scope.amount))}</small>${bar(share(r.amount,d.topMerchants[0]?.amount||0))}</div><b class="sdb-amt">${money(r.amount,r.currency)}</b></li>`).join('')||'<li class="empty">No spending in this period.</li>'}</ol>`,'sdb-grow2')}
       ${card('Largest transactions','Click one to open it',`<div class="table-wrap"><table class="table sdb-table"><thead><tr><th>Date</th><th>Merchant</th>${project?'':'<th class="sd-hide-sm">Project</th>'}<th class="right">Amount</th></tr></thead><tbody>${ownerInfo.largest.map(t=>`<tr class="clickable" data-sd-tx="${t.id}" tabindex="0"><td class="sdb-nowrap">${esc(t.transaction_date?new Date(t.transaction_date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'2-digit'}):'—')}</td><td class="sdb-ell sdb-merchant" title="${esc(`${t.merchant||''} · ${t.category}`)}"><b>${esc(t.merchant||'Unknown merchant')}</b><small>${esc(t.category)}</small></td>${project?'':`<td class="sd-hide-sm sdb-nowrap">${esc(t.code||'No project')}</td>`}<td class="right money"><b>${money(t.amount,t.currency)}</b></td></tr>`).join('')||'<tr><td colspan="5"><div class="empty">No transactions.</div></td></tr>'}</tbody></table></div>`,'sdb-grow3')}</div>
       ${project?'':card('Projects','Click one to see this person there',`<ol class="sdb-rank">${ownerInfo.projects.map((r,i)=>`<li class="clickable" data-sd-project="${esc(r.code??'NO_PROJECT')}" data-sd-keep-owner="1" tabindex="0"><span class="sdb-pos">${i+1}</span><div><b>${esc(r.name)}</b><small>${n(r.count)} tx · ${pct(share(r.amount,scope.amount))}</small>${bar(share(r.amount,ownerInfo.projects[0]?.amount||0))}</div><b class="sdb-amt">${money(r.amount,r.currency)}</b></li>`).join('')}</ol>`)}`;
   }else if(isProject){
     const people=st.allPeople?d.topUsers:d.topUsers.slice(0,SD_OWNER_LIMIT);
-    main=`<section class="sdb-kpis">${tile('Project spend',whole(scope.amount),`${pct(share(scope.amount,all.amount))} of all spend`,0)}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1)}${tile('People spending',n(scope.owners),'Who made transactions',2)}${tile('Per person',whole(scope.owners?scope.amount/scope.owners:0),'Average spend',3)}</section>
-      ${charts('Monthly spend')}
+    main=`<section class="sdb-kpis">${tile('Project spend',whole(scope.amount),`${pct(share(scope.amount,all.amount))} of all spend`,0,scope.amount,'money')}${tile('Transactions',n(scope.count),`Average ${money(scope.count?scope.amount/scope.count:0)}`,1,scope.count,'count')}${tile('People spending',n(scope.owners),'Who made transactions',2,scope.owners,'count')}${tile('Per person',whole(scope.owners?scope.amount/scope.owners:0),'Average spend',3,scope.owners?scope.amount/scope.owners:0,'money')}</section>
+      ${charts('Spend over time')}
       ${card('Spending by person',d.topUsers.length>SD_OWNER_LIMIT?`<button type="button" class="sdb-link" data-sd-allpeople>${st.allPeople?`Show top ${SD_OWNER_LIMIT}`:`Show all ${n(d.topUsers.length)} →`}</button>`:'',peopleTable(people,scope.amount,false),'sdb-flush')}`;
   }else{
-    main=`<section class="sdb-kpis">${tile('Total spend',whole(all.amount),`Billed in ${esc(cur)}${d.overall.length>1?` · plus ${d.overall.slice(1).map(o=>money(o.amount,o.currency)).join(', ')}`:''}`,0)}${tile('Transactions',n(all.count),`Average ${money(all.count?all.amount/all.count:0)}`,1)}${tile('People spending',n(all.owners),'Card holders and claimants',2)}${tile('Projects',n(all.projects),projects.some(p=>p.code===null)?`Plus ${money(projects.find(p=>p.code===null).amount)} not linked`:'With synced spending',3)}</section>
-      ${charts('Monthly spend')}
+    main=`<section class="sdb-kpis">${tile('Total spend',whole(all.amount),`Billed in ${esc(cur)}${d.overall.length>1?` · plus ${d.overall.slice(1).map(o=>money(o.amount,o.currency)).join(', ')}`:''}`,0,all.amount,'money')}${tile('Transactions',n(all.count),`Average ${money(all.count?all.amount/all.count:0)}`,1,all.count,'count')}${tile('People spending',n(all.owners),'Card holders and claimants',2,all.owners,'count')}${tile('Projects',n(all.projects),projects.some(p=>p.code===null)?`Plus ${money(projects.find(p=>p.code===null).amount)} not linked`:'With synced spending',3,all.projects,'count')}</section>
+      ${charts('Spend over time')}
       ${card('Top 10 spenders','Click a person for details',peopleTable(d.topUsers,all.amount,true),'sdb-flush')}`;
   }
 
   c.innerHTML=pageHead('Spend dashboard','Where the money goes, by project and by person, from transactions synced from Pleo.')+`<div class="sdb-toolbar"><div class="sdb-period" role="group" aria-label="Period">${presets.map(([id,l,f])=>`<button type="button" class="${activePreset===id?'on':''}" aria-pressed="${activePreset===id}" data-sd-from="${f}">${l}</button>`).join('')}<button type="button" class="${activePreset==='custom'?'on':''}" aria-pressed="${activePreset==='custom'}" data-sd-custom>Custom</button></div>
   ${activePreset==='custom'?`<form id="sd-range" class="sdb-range"><label>From<input type="date" name="from" value="${esc(st.from)}"></label><label>To<input type="date" name="to" value="${esc(st.to)}"></label><button class="btn btn-primary">Apply</button></form>`:''}</div>
-  <div class="sdb-layout"><aside class="sdb-side sdb-card" aria-label="${project?'People in this project':'Projects'}">${side}</aside><div class="sdb-main"><nav class="sdb-crumbs" aria-label="Selection">${crumbs.join('<span aria-hidden="true">›</span>')}</nav>${head}${main}</div></div>`;
+  <div class="sdb-layout"><aside class="sdb-side sdb-card" aria-label="${project?'People in this project':'Projects'}">${side}</aside><div class="sdb-main"><nav class="sdb-crumbs" aria-label="Selection">${crumbs.join('<span aria-hidden="true">›</span>')}${catChip}</nav>${head}${main}</div></div>`;
 
   const go=()=>{c.querySelector('.sdb-layout')?.classList.add('sdb-busy');return renderSpend(c).catch(e=>toast(e.message,true))};
+  // Chart: re-drawn in place when the granularity changes (no refetch).
+  const drawChart=g=>{
+    const host=c.querySelector('#sd-chart');if(!host)return;
+    const buckets=sdBuckets(d,cur,g);host.innerHTML=sdTimeChart(buckets,cur);
+    const peakB=buckets.reduce((a,b)=>!a||b.amount>a.amount?b:a,null),pn=c.querySelector('.sdb-peak-note');
+    if(pn)pn.textContent=peakB?`Peak ${sdCompact(peakB.amount,cur)} · ${peakB.long}. Click a bar to focus on it.`:'';
+    const chart=host.querySelector('.sdb-chart');if(!chart)return;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>chart.classList.add('in')));
+    const tip=chart.querySelector('.sdb-tip'),total=buckets.reduce((s,b)=>s+b.amount,0);
+    const show=col=>{const i=Number(col.dataset.i),b=buckets[i],prev=buckets[i-1];
+      const diff=prev&&prev.amount>0?(b.amount-prev.amount)/prev.amount*100:null;
+      tip.innerHTML=`<b>${esc(b.long)}</b><strong>${esc(fmtMoney(b.amount,cur))}</strong><span>${fmtCount(b.count)} transactions · ${total>0?(b.amount/total*100).toFixed(1):0}% of shown</span>${diff==null?'':`<em class="${diff>=0?'up':'down'}">${diff>=0?'▲':'▼'} ${Math.abs(diff).toFixed(0)}% vs previous</em>`}`;
+      const x=col.offsetLeft+col.offsetWidth/2,w=chart.clientWidth;tip.style.left=`${Math.max(90,Math.min(w-90,x))}px`;chart.classList.add('tipping');chart.querySelectorAll('.sdb-col.hover').forEach(o=>o.classList.remove('hover'));col.classList.add('hover')};
+    const hide=()=>{chart.classList.remove('tipping');chart.querySelectorAll('.sdb-col.hover').forEach(o=>o.classList.remove('hover'))};
+    chart.querySelectorAll('.sdb-col').forEach(col=>{col.onpointerenter=()=>show(col);col.onfocus=()=>show(col);col.onblur=hide;
+      col.onclick=()=>{const b=buckets[Number(col.dataset.i)];st.from=b.from;st.to=b.to;st.custom=true;st.gran=g==='month'?'week':'day';toast(`Showing ${b.long}`);go()}});
+    chart.onpointerleave=hide;
+  };
+  drawChart(gran);
+  c.querySelectorAll('[data-sd-gran]').forEach(b=>b.onclick=()=>{st.gran=b.dataset.sdGran;c.querySelectorAll('[data-sd-gran]').forEach(o=>{const on=o===b;o.classList.toggle('on',on);o.setAttribute('aria-pressed',on)});drawChart(st.gran)});
+  // Donut: sweep the segments in, highlight on hover, filter on click.
+  const dw=c.querySelector('.sdb-donut-wrap');
+  if(dw){
+    const segs=[...dw.querySelectorAll('.sdb-seg')],C=dw.dataset.c,mainT=dw.querySelector('.sdb-donut-total'),subT=dw.querySelector('.sdb-donut-sub');
+    if(sdReduceMotion())segs.forEach(sg=>sg.setAttribute('stroke-dasharray',`${sg.dataset.len} ${C}`));
+    else requestAnimationFrame(()=>requestAnimationFrame(()=>segs.forEach(sg=>sg.setAttribute('stroke-dasharray',`${sg.dataset.len} ${C}`))));
+    const focus=i=>{const b=dw.querySelector(`.sdb-legend button[data-i="${i}"]`);dw.classList.add('hl');segs.forEach(sg=>sg.classList.toggle('on',sg.dataset.i===String(i)));dw.querySelectorAll('.sdb-legend button').forEach(o=>o.classList.toggle('on',o===b));mainT.textContent=b.dataset.pct;subT.textContent=b.dataset.name.length>18?b.dataset.name.slice(0,17)+'…':b.dataset.name};
+    const blur=()=>{dw.classList.remove('hl');segs.forEach(sg=>sg.classList.remove('on'));dw.querySelectorAll('.sdb-legend button').forEach(o=>o.classList.remove('on'));mainT.textContent=dw.dataset.total;subT.textContent='total spend'};
+    segs.forEach(sg=>{sg.onpointerenter=()=>focus(sg.dataset.i);sg.onpointerleave=blur;sg.onclick=()=>dw.querySelector(`.sdb-legend button[data-i="${sg.dataset.i}"]`)?.click()});
+    dw.querySelectorAll('.sdb-legend button').forEach(b=>{b.onpointerenter=()=>focus(b.dataset.i);b.onfocus=()=>focus(b.dataset.i);b.onpointerleave=blur;b.onblur=blur});
+  }
+  c.querySelectorAll('[data-sd-category]').forEach(b=>b.onclick=()=>{st.category=b.dataset.sdCategory;toast(`Showing ${st.category} only`);go()});
+  c.querySelector('[data-sd-clear-category]')?.addEventListener('click',()=>{st.category=null;go()});
+  sdCountUp(c);
   const enter=el=>{el.onkeydown=e=>{if(e.key==='Enter'&&e.target===el)el.click()}};
   c.querySelectorAll('[data-sd-project]').forEach(b=>{b.onclick=()=>{if(!b.dataset.sdKeepOwner)st.owner=null;st.project=b.dataset.sdProject||null;st.oq='';st.allPeople=false;go()};if(b.tagName==='LI')enter(b)});
   c.querySelectorAll('[data-sd-owner]').forEach(b=>{b.onclick=()=>{st.owner=b.dataset.sdOwner||null;go()};if(b.tagName==='TR')enter(b)});
