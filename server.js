@@ -2184,6 +2184,8 @@ async function api(req,res,url){
       if(scopeProject==='NO_PROJECT')sWhere+=` AND ${project} IS NULL`;else if(scopeProject){sWhere+=` AND ${project}=?`;sArgs.push(scopeProject);}
       if(scopeOwner){sWhere+=` AND ${owner}=?`;sArgs.push(scopeOwner);}
       const nums=rows=>rows.map(r=>({...r,count:Number(r.count),amount:Number(r.amount),...(r.owners!=null&&{owners:Number(r.owners)}),...(r.projects!=null&&{projects:Number(r.projects)})}));
+      // First and last transaction day in the chosen period (for the header).
+      const coverage=db.prepare(`SELECT MIN(substr(t.transaction_date,1,10)) AS first_day,MAX(substr(t.transaction_date,1,10)) AS last_day ${from_} ${where}`).get(...args)||{};
       const receipts=nums(db.prepare(`SELECT t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,
         SUM(CASE WHEN t.receipt_count>0 THEN 1 ELSE 0 END) with_count,COALESCE(SUM(CASE WHEN t.receipt_count>0 THEN -t.bill_amount ELSE 0 END),0) with_amount,
         SUM(CASE WHEN t.receipt_count>0 THEN 0 ELSE 1 END) without_count,COALESCE(SUM(CASE WHEN t.receipt_count>0 THEN 0 ELSE -t.bill_amount END),0) without_amount
@@ -2220,7 +2222,7 @@ async function api(req,res,url){
       const byKey=new Map(projects.map(p=>[key(p),p]));
       for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
       if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
-      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts},coverage:{first:coverage.first_day||null,last:coverage.last_day||null},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
     }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and
