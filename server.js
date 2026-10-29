@@ -67,8 +67,9 @@ const cfg = {
   // First-ever incremental sync (no checkpoint yet) fetches only this many
   // hours. Anything older is a deliberate historical backfill.
   pleoInitialLookbackHours: Math.max(1, Number(process.env.PLEO_INITIAL_LOOKBACK_HOURS || 24)),
-  // Upper bound for a user-chosen "Sync now" range.
-  pleoMaxSyncRangeDays: 31,
+  // "Sync now" takes any range; it is fetched from Pleo in windows of this
+  // many days, one after another, within the same run.
+  pleoSyncWindowDays: 31,
   allowRecoveryImport: envBool('ALLOW_RECOVERY_IMPORT', true),
 };
 // Reviewer-chosen commercial classification. The legacy values stay valid in
@@ -1752,32 +1753,42 @@ async function syncPleo(runId, triggerType='manual', userId=null, opts={}) {
       const startDate=new Date(startMs);
       const body={includeDeleted:false,settledAtStart:startDate.toISOString(),settledAtEnd:endDate.toISOString()};
       db.prepare('UPDATE pleo_sync_runs SET requested_from=?,requested_to=? WHERE id=?').run(body.settledAtStart,body.settledAtEnd,runId);
-      let after=null,pages=0,complete=false;
-      const cursors=new Set();
-      while(pages<500){
-        throwIfSyncCancelled(runId);
-        const q={company_id:cfg.pleoCompanyId,limit:100};if(after)q.after=after;
-        const p=await pleoRequest('POST','/v1/accounting-entries:search',{query:q,body});
-        throwIfSyncCancelled(runId);
-        const rows=p.data||[];
-        for(const item of rows){
-          if(!item.id)continue;
-          const settledMs=Date.parse(item.settledAt||'');
-          if(!Number.isFinite(settledMs)||settledMs<startMs||settledMs>endDate.getTime())continue;
-          if(!cfg.pleoMockMode&&isKnownDemoId(item.id))throw new Error('Live sync returned a demo-fixture ID');
-          const m=mapAccountingEntry(item,employeeMap,categoryMap);
-          Object.assign(m,provenanceFor('ACCOUNTING_ENTRIES_API','LIVE_API'),{source_import_run_id:runId});
-          upsertRaw(item.id,item.companyId,mode,null,item);
-          const u=upsertTransaction(m);u.inserted?inserted++:updated++;itemsSeen++;
-          enqueueReceiptJobs(u.id,item,runId);att+=(item.receiptIds||[]).length;
+      // Any length of range: Pleo is asked for one window of at most
+      // cfg.pleoSyncWindowDays at a time, each paged to completion, so a long
+      // range never hits a single query's page limit. A row settled exactly
+      // on a window boundary belongs to the later window only.
+      const endMs=endDate.getTime(),windowMs=cfg.pleoSyncWindowDays*86400_000;
+      let pages=0;
+      for(let wStart=startMs;wStart<endMs;wStart+=windowMs){
+        const wEnd=Math.min(wStart+windowMs,endMs),last=wEnd>=endMs;
+        const wBody={...body,settledAtStart:new Date(wStart).toISOString(),settledAtEnd:new Date(wEnd).toISOString()};
+        let after=null,wPages=0,complete=false;
+        const cursors=new Set();
+        while(wPages<2000){
+          throwIfSyncCancelled(runId);
+          const q={company_id:cfg.pleoCompanyId,limit:100};if(after)q.after=after;
+          const p=await pleoRequest('POST','/v1/accounting-entries:search',{query:q,body:wBody});
+          throwIfSyncCancelled(runId);
+          const rows=p.data||[];
+          for(const item of rows){
+            if(!item.id)continue;
+            const settledMs=Date.parse(item.settledAt||'');
+            if(!Number.isFinite(settledMs)||settledMs<wStart||settledMs>wEnd||(!last&&settledMs===wEnd))continue;
+            if(!cfg.pleoMockMode&&isKnownDemoId(item.id))throw new Error('Live sync returned a demo-fixture ID');
+            const m=mapAccountingEntry(item,employeeMap,categoryMap);
+            Object.assign(m,provenanceFor('ACCOUNTING_ENTRIES_API','LIVE_API'),{source_import_run_id:runId});
+            upsertRaw(item.id,item.companyId,mode,null,item);
+            const u=upsertTransaction(m);u.inserted?inserted++:updated++;itemsSeen++;
+            enqueueReceiptJobs(u.id,item,runId);att+=(item.receiptIds||[]).length;
+          }
+          wPages++;pages++;updateSyncProgress(runId,{jobs,itemsSeen,inserted,updated,att,errors,pagesFetched:pages});
+          if(!p.pagination?.hasNextPage){complete=true;break;}
+          const cursor=p.pagination.endCursor;
+          if(!cursor||cursors.has(cursor))throw new Error('Live sync returned an invalid pagination cursor');
+          cursors.add(cursor);after=cursor;
         }
-        pages++;updateSyncProgress(runId,{jobs,itemsSeen,inserted,updated,att,errors,pagesFetched:pages});
-        if(!p.pagination?.hasNextPage){complete=true;break;}
-        const cursor=p.pagination.endCursor;
-        if(!cursor||cursors.has(cursor))throw new Error('Live sync returned an invalid pagination cursor');
-        cursors.add(cursor);after=cursor;
+        if(!complete)throw new Error(`Live sync exceeded its page limit for ${wBody.settledAtStart.slice(0,10)} to ${wBody.settledAtEnd.slice(0,10)}; range is incomplete`);
       }
-      if(!complete)throw new Error('Live sync exceeded its page limit; range is incomplete');
       // A failed/partial run may safely upsert again, but must never skip pages.
       const pending=await syncPendingEntries(runId,employeeMap,categoryMap,Number.isFinite(fromMs)?{startMs,endMs:endDate.getTime()}:null);
       inserted+=pending.inserted;updated+=pending.updated;itemsSeen+=pending.itemsSeen;att+=pending.att;
@@ -2163,11 +2174,20 @@ async function api(req,res,url){
       // A category filter narrows everything, sidebar included, like the period does.
       const scopeCategory=url.searchParams.get('category')||null;
       if(scopeCategory){where+=` AND ${category}=?`;args.push(scopeCategory);}
+      // Receipts filter (same test as the Transactions evidence filter). The
+      // with/missing counts below are taken before it, so both stay visible.
+      const scopeReceipts=['with','without'].includes(url.searchParams.get('receipts'))?url.searchParams.get('receipts'):null;
+      const preReceiptWhere=where;
+      if(scopeReceipts)where+=scopeReceipts==='with'?' AND t.receipt_count>0':' AND COALESCE(t.receipt_count,0)=0';
       const scopeProject=url.searchParams.get('project')||null,scopeOwner=url.searchParams.get('owner')||null;
       let sWhere=where;const sArgs=[...args];
       if(scopeProject==='NO_PROJECT')sWhere+=` AND ${project} IS NULL`;else if(scopeProject){sWhere+=` AND ${project}=?`;sArgs.push(scopeProject);}
       if(scopeOwner){sWhere+=` AND ${owner}=?`;sArgs.push(scopeOwner);}
       const nums=rows=>rows.map(r=>({...r,count:Number(r.count),amount:Number(r.amount),...(r.owners!=null&&{owners:Number(r.owners)}),...(r.projects!=null&&{projects:Number(r.projects)})}));
+      const receipts=nums(db.prepare(`SELECT t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,
+        SUM(CASE WHEN t.receipt_count>0 THEN 1 ELSE 0 END) with_count,COALESCE(SUM(CASE WHEN t.receipt_count>0 THEN -t.bill_amount ELSE 0 END),0) with_amount,
+        SUM(CASE WHEN t.receipt_count>0 THEN 0 ELSE 1 END) without_count,COALESCE(SUM(CASE WHEN t.receipt_count>0 THEN 0 ELSE -t.bill_amount END),0) without_amount
+        ${from_} ${preReceiptWhere}${sWhere.slice(where.length)} GROUP BY t.bill_currency ORDER BY count DESC`).all(...sArgs)).map(r=>({...r,with_count:Number(r.with_count),with_amount:Number(r.with_amount),without_count:Number(r.without_count),without_amount:Number(r.without_amount)}));
       const totalsFor=(w,a)=>nums(db.prepare(`SELECT t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount,COUNT(DISTINCT ${owner}) owners,COUNT(DISTINCT ${project}) projects ${from_} ${w} GROUP BY t.bill_currency ORDER BY count DESC`).all(...a));
       const totals=totalsFor(sWhere,sArgs);
       // Whole-period totals, so a project or person can be shown as a share of everything.
@@ -2200,7 +2220,7 @@ async function api(req,res,url){
       const byKey=new Map(projects.map(p=>[key(p),p]));
       for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
       if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
-      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory},totals,overall,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
     }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and
@@ -2814,7 +2834,7 @@ async function api(req,res,url){
       const running=syncInProgress?db.prepare("SELECT id,trigger_type,started_at,items_seen,inserted_count,updated_count FROM pleo_sync_runs WHERE status='RUNNING' ORDER BY id DESC LIMIT 1").get()||null:null;
       const newSinceLastSync=lastSuccess?db.prepare('SELECT COUNT(*) c FROM transactions WHERE created_at>=?').get(lastSuccess.started_at).c:0;
       const pick=r=>r&&{id:r.id,trigger_type:r.trigger_type,status:r.status,started_at:r.started_at,finished_at:r.finished_at,items_seen:r.items_seen,inserted_count:r.inserted_count,updated_count:r.updated_count,error_message:r.error_message};
-      return json(res,200,{...settings,configured:pleoConfigured(),syncMode:cfg.pleoSyncMode,syncInProgress,stopping:Boolean(running&&syncCancelRequested===running.id),running,checkpoint:getKv('pleo_accounting_entries_settled_last_success'),maxRangeDays:cfg.pleoMaxSyncRangeDays,next:decision.next,doneToday:decision.doneToday,lastSuccess:pick(lastSuccess),lastRun:pick(lastIncremental),newSinceLastSync});
+      return json(res,200,{...settings,configured:pleoConfigured(),syncMode:cfg.pleoSyncMode,syncInProgress,stopping:Boolean(running&&syncCancelRequested===running.id),running,checkpoint:getKv('pleo_accounting_entries_settled_last_success'),next:decision.next,doneToday:decision.doneToday,lastSuccess:pick(lastSuccess),lastRun:pick(lastIncremental),newSinceLastSync});
     }
     if(req.method==='POST'&&url.pathname==='/api/pleo/sync'){
       const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
@@ -2828,7 +2848,6 @@ async function api(req,res,url){
         if(!Number.isFinite(fromMs)||fromMs>Date.now())return json(res,400,{error:'From must be a valid date, not in the future'});
         if(!Number.isFinite(toMs))return json(res,400,{error:'To must be a valid date'});
         if(toMs<=fromMs)return json(res,400,{error:'To must be after From'});
-        if(Math.min(toMs,Date.now())-fromMs>cfg.pleoMaxSyncRangeDays*86400_000+86400_000)return json(res,400,{error:`Sync now covers at most ${cfg.pleoMaxSyncRangeDays} days at a time. Use Pleo Sync → historical backfill for longer periods.`});
         from=new Date(fromMs).toISOString();
         if(given(b.to))to=new Date(Math.min(toMs,Date.now())).toISOString();
       }

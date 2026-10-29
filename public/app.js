@@ -449,7 +449,7 @@ function renderRemovalPopover(c,pop,close){
 // the time and run it on demand; Finance QC sees the status read-only.
 // "Show new" filters the list to rows first seen by the latest sync, which is
 // the day's allocation/approval worklist.
-const TX_SYNC_RANGES=[['24h','Last 24 hours'],['since','Since last sync'],['7d','Last 7 days'],['30d','Last 30 days'],['custom','Custom date range…']];
+const TX_SYNC_RANGES=[['24h','Last 24 hours'],['since','Since last sync'],['7d','Last 7 days'],['30d','Last 30 days'],['90d','Last 3 months'],['180d','Last 6 months'],['365d','Last 12 months'],['custom','Custom date range…']];
 // YYYY-MM-DD for today + offset days, in the browser's local calendar.
 const localDay=(offset=0)=>{const x=new Date();x.setDate(x.getDate()+offset);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`};
 const syncTzLabel=tz=>String(tz||'').split('/').pop().replaceAll('_',' ')+' time';
@@ -490,7 +490,7 @@ async function renderTxSync(c,live=null){
   }
   el.querySelector('#ds-show-new')?.addEventListener('click',()=>{state.filters.new_since=d.lastSuccess.started_at;state.txPage=1;state.selected.clear();renderTransactions(c)});
   el.querySelector('#ds-now')?.addEventListener('click',async()=>{
-    const range=el.querySelector('#ds-range').value,hours={'24h':24,'7d':168,'30d':720}[range];
+    const range=el.querySelector('#ds-range').value,hours={'24h':24,'7d':168,'30d':720,'90d':2160,'180d':4320,'365d':8760}[range];
     let from=hours?new Date(Date.now()-hours*3600_000).toISOString():null,to=null;
     if(range==='custom'){
       const f=el.querySelector('#ds-from').value,t=el.querySelector('#ds-to').value;
@@ -498,11 +498,11 @@ async function renderTxSync(c,live=null){
       if(t<f)return toast('To date must be on or after the From date',true);
       // Whole local days: From 00:00 to the end of the To day (capped at now by the server).
       from=new Date(f+'T00:00:00').toISOString();to=new Date(t+'T23:59:59.999').toISOString();
-      if((Date.parse(to)-Date.parse(from))/86400_000>d.maxRangeDays+1)return toast(`Choose at most ${d.maxRangeDays} days. Use Pleo Sync → historical backfill for longer periods.`,true);
     }
     const dayLabel=v=>new Intl.DateTimeFormat('en-GB',{dateStyle:'medium'}).format(new Date(v+'T00:00:00'));
     const span=range==='custom'?`${dayLabel(el.querySelector('#ds-from').value)} to ${dayLabel(el.querySelector('#ds-to').value)} (whole days)`:`${fmtDate(from||d.checkpoint)} to now`;
-    if(!confirm(`Fetch Pleo transactions settled from ${span}?\n\nNew rows are added to Transactions; existing rows are refreshed without changing assignments or approvals. You can stop the sync while it runs — anything it added is then removed.`))return;
+    const days=(Date.parse(to||new Date().toISOString())-Date.parse(from||d.checkpoint||new Date().toISOString()))/86400_000;
+    if(!confirm(`Fetch Pleo transactions settled from ${span}?${days>31?`\n\nThis covers about ${Math.round(days)} days. It is fetched a month at a time and can take several minutes; you can keep working meanwhile.`:''}\n\nNew rows are added to Transactions; existing rows are refreshed without changing assignments or approvals. You can stop the sync while it runs — anything it added is then removed.`))return;
     try{const r=await post('/api/pleo/sync',from?{from,...(to?{to}:{})}:{});renderTxSync(c,{items_seen:0,inserted_count:0});await followTxSync(c,r.runId)}catch(e){toast(e.message,true);renderTxSync(c)}
   });
   el.querySelector('#ds-stop')?.addEventListener('click',async()=>{
@@ -786,8 +786,8 @@ function sdCountUp(root){
   for(const el of els)el.textContent=fmt(el,0);requestAnimationFrame(step);
 }
 async function renderSpend(c){
-  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,category:null,gran:'auto',pq:'',oq:'',allPeople:false});
-  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);if(st.category)qs.set('category',st.category);
+  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,category:null,receipts:null,gran:'auto',pq:'',oq:'',allPeople:false});
+  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);if(st.category)qs.set('category',st.category);if(st.receipts)qs.set('receipts',st.receipts);
   const d=await api(`/api/analytics/spend-dashboard?${qs}`);if(state.page!=='spend')return;
   const listScroll=c.querySelector('.sdb-list')?.scrollTop||0;
   const all=d.overall[0]||{count:0,amount:0,owners:0,projects:0},cur=all.currency||'GBP',scope=d.totals[0]||{count:0,amount:0,owners:0,projects:0};
@@ -832,7 +832,16 @@ async function renderSpend(c){
   const crumbs=[`<button type="button" data-sd-project="">All projects</button>`];
   if(project)crumbs.push(isOwner?`<button type="button" data-sd-owner="">${esc(project.name)}</button>`:`<b>${esc(project.name)}</b>`);
   if(isOwner)crumbs.push(`<b>${esc(ownerInfo.name)}</b>`);
-  const catChip=st.category?`<span class="sdb-chip">Category: <b>${esc(st.category)}</b><button type="button" data-sd-clear-category aria-label="Remove category filter">×</button></span>`:'';
+  const catChip=(st.category?`<span class="sdb-chip">Category: <b>${esc(st.category)}</b><button type="button" data-sd-clear-category aria-label="Remove category filter">×</button></span>`:'')
+    +(st.receipts?`<span class="sdb-chip ${st.receipts==='without'?'warn':''}">Receipts: <b>${st.receipts==='with'?'attached':'missing'}</b><button type="button" data-sd-receipts="${st.receipts}" aria-label="Remove receipts filter">×</button></span>`:'');
+  // Receipts strip: with vs missing for the current view; each option filters the dashboard.
+  const rc=d.receipts.find(r=>r.currency===cur)||{count:0,amount:0,with_count:0,with_amount:0,without_count:0,without_amount:0};
+  const rcWith=share(rc.with_amount,rc.amount),rcMiss=share(rc.without_amount,rc.amount);
+  const rcOpt=(key,label,cnt,amt,icon)=>`<button type="button" class="sdb-rc-opt ${key} ${st.receipts===key?'on':''}" data-sd-receipts="${key}" aria-pressed="${st.receipts===key}"><span class="sdb-rc-icon" aria-hidden="true">${icon}</span><span class="sdb-rc-text"><b>${label}</b><small>${n(cnt)} transaction${cnt===1?'':'s'} · ${money(amt)}</small></span><span class="sdb-rc-pct">${pct(share(amt,rc.amount))}</span></button>`;
+  const receiptStrip=`<section class="sdb-card sdb-receipts" aria-label="Receipts"><div class="sdb-card-head"><h3>Receipts</h3><span>${rc.amount>0?`${pct(rcWith)} of spend has a receipt`:'No spending in this view'}</span></div>
+    <div class="sdb-rc-bar" role="img" aria-label="${pct(rcWith)} with receipts, ${pct(rcMiss)} missing"><i class="with" style="width:${rcWith.toFixed(1)}%"></i><i class="without" style="width:${rcMiss.toFixed(1)}%"></i></div>
+    <div class="sdb-rc-opts">${rcOpt('with','With receipts',rc.with_count,rc.with_amount,'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>')}${rcOpt('without','Missing receipts',rc.without_count,rc.without_amount,'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5m0 3.5v.5"/><circle cx="12" cy="12" r="9"/></svg>')}
+    <button type="button" class="sdb-link sdb-rc-tx" data-sd-to-tx>View ${st.receipts==='with'?'these':st.receipts==='without'?'missing ones':'them'} in Transactions →</button></div></section>`;
   const granToggle=`<div class="sdb-gran" role="group" aria-label="Chart detail">${[['day','Daily'],['week','Weekly'],['month','Monthly']].map(([g,l])=>`<button type="button" data-sd-gran="${g}" aria-pressed="${gran===g}" class="${gran===g?'on':''}">${l}</button>`).join('')}</div>`;
   const charts=title=>`<div class="sdb-row">${card(title,granToggle,`<p class="sdb-peak-note"></p><div id="sd-chart"></div>`,'sdb-grow3 sdb-chart-card')}${card('Categories',st.category?'':'Click one to filter',sdDonut(d.topCategories.filter(r=>r.currency===cur),scope.amount,cur),'sdb-grow2')}</div>`;
   let head='',main;
@@ -855,6 +864,7 @@ async function renderSpend(c){
       ${card('Top 10 spenders','Click a person for details',peopleTable(d.topUsers,all.amount,true),'sdb-flush')}`;
   }
 
+  main=main.replace('</section>',`</section>${receiptStrip}`);
   c.innerHTML=pageHead('Spend dashboard','Where the money goes, by project and by person, from transactions synced from Pleo.')+`<div class="sdb-toolbar"><div class="sdb-period" role="group" aria-label="Period">${presets.map(([id,l,f])=>`<button type="button" class="${activePreset===id?'on':''}" aria-pressed="${activePreset===id}" data-sd-from="${f}">${l}</button>`).join('')}<button type="button" class="${activePreset==='custom'?'on':''}" aria-pressed="${activePreset==='custom'}" data-sd-custom>Custom</button></div>
   ${activePreset==='custom'?`<form id="sd-range" class="sdb-range"><label>From<input type="date" name="from" value="${esc(st.from)}"></label><label>To<input type="date" name="to" value="${esc(st.to)}"></label><button class="btn btn-primary">Apply</button></form>`:''}</div>
   <div class="sdb-layout"><aside class="sdb-side sdb-card" aria-label="${project?'People in this project':'Projects'}">${side}</aside><div class="sdb-main"><nav class="sdb-crumbs" aria-label="Selection">${crumbs.join('<span aria-hidden="true">›</span>')}${catChip}</nav>${head}${main}</div></div>`;
@@ -893,6 +903,15 @@ async function renderSpend(c){
   }
   c.querySelectorAll('[data-sd-category]').forEach(b=>b.onclick=()=>{st.category=b.dataset.sdCategory;toast(`Showing ${st.category} only`);go()});
   c.querySelector('[data-sd-clear-category]')?.addEventListener('click',()=>{st.category=null;go()});
+  c.querySelectorAll('[data-sd-receipts]').forEach(b=>b.onclick=()=>{const k=b.dataset.sdReceipts;st.receipts=st.receipts===k?null:k;if(st.receipts)toast(st.receipts==='with'?'Showing spending with receipts':'Showing spending missing receipts');go()});
+  // Open the same selection in the Transactions tab (its filters use the same names).
+  c.querySelector('[data-sd-to-tx]')?.addEventListener('click',()=>{
+    const f=state.filters;for(const k of Object.keys(f))f[k]='';
+    f.receipt_status=st.receipts==='with'?'present':st.receipts==='without'?'missing':'';
+    if(project&&project.code)f.project=project.code;if(isOwner)f.employee=st.owner;if(st.category)f.category=st.category;
+    if(st.from)f.dateFrom=st.from;if(st.to)f.dateTo=st.to;
+    state.txPage=1;state.selected.clear();state.page='transactions';renderShell();window.scrollTo(0,0);
+  });
   sdCountUp(c);
   const enter=el=>{el.onkeydown=e=>{if(e.key==='Enter'&&e.target===el)el.click()}};
   c.querySelectorAll('[data-sd-project]').forEach(b=>{b.onclick=()=>{if(!b.dataset.sdKeepOwner)st.owner=null;st.project=b.dataset.sdProject||null;st.oq='';st.allPeople=false;go()};if(b.tagName==='LI')enter(b)});

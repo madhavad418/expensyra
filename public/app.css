@@ -1239,3 +1239,28 @@ ol.sdb-rank li:nth-child(-n+3) .sdb-pos{background:#e8f1fd;color:var(--jsan-prim
 .sdb-fill,.sdb-seg,.sdb-peak-val,.sdb-avg,.sdb-tip,.sdb-kpi{transition:none}
 .sdb-fill{height:var(--h)}.sdb-peak-val,.sdb-avg{opacity:1}.sdb-peak-val{transform:translate(-50%,0)}
 }
+/* Spend dashboard: receipts strip */
+.sdb-main>.sdb-receipts{padding:20px 22px;gap:14px;animation-delay:.12s}
+.sdb-rc-bar{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#eef1f4}
+.sdb-rc-bar i{display:block;height:100%;transform-origin:left;animation:sdbGrow .9s cubic-bezier(.2,.8,.2,1) .25s both}
+.sdb-rc-bar i.with{background:#0f8a5f}
+.sdb-rc-bar i.without{background:#f0a43a;animation-delay:.45s}
+.sdb-rc-opts{display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+.sdb-rc-opt{flex:1 1 220px;display:flex;align-items:center;gap:12px;min-height:56px;padding:10px 14px;border:1.5px solid #e6ebf2;border-radius:14px;background:#fff;font:inherit;text-align:left;color:var(--jsan-text-primary);cursor:pointer;transition:border-color .2s ease,background .2s ease,transform .2s ease,box-shadow .2s ease}
+.sdb-rc-opt:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(10,26,58,.07)}
+.sdb-rc-opt:focus-visible{outline:2px solid var(--jsan-primary);outline-offset:2px}
+.sdb-rc-icon{width:36px;height:36px;border-radius:50%;flex:none;display:grid;place-items:center}
+.sdb-rc-opt.with .sdb-rc-icon{background:#e7f6ef;color:#0f7a54}
+.sdb-rc-opt.without .sdb-rc-icon{background:#fdf1e3;color:#8a4a00}
+.sdb-rc-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.sdb-rc-text b{font-size:14px}
+.sdb-rc-text small{font-size:12px;color:var(--jsan-text-muted)}
+.sdb-rc-pct{font-size:18px;font-weight:800;font-variant-numeric:tabular-nums}
+.sdb-rc-opt.with.on{border-color:#0f8a5f;background:#f2fbf7}
+.sdb-rc-opt.without.on{border-color:#d98a1c;background:#fffaf2}
+.sdb-rc-opt.with .sdb-rc-pct{color:#0f7a54}
+.sdb-rc-opt.without .sdb-rc-pct{color:#8a4a00}
+.sdb-rc-tx{flex-basis:100%;text-align:right;white-space:nowrap}
+.sdb-chip.warn{background:#fdf1e3;color:#8a4a00}
+@media(max-width:640px){.sdb-main>.sdb-receipts{padding:16px}.sdb-rc-tx{text-align:left}}
+@media(prefers-reduced-motion:reduce){.sdb-rc-bar i{animation:none}.sdb-rc-opt{transition:none}}
