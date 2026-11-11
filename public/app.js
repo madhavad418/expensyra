@@ -317,7 +317,7 @@ async function renderTransactions(c){
   ${manage?`<section class="tx-alloc" aria-label="Allocate work">
     <div><div class="kicker">Allocate work</div><div class="tx-alloc-meta"><b id="tx-sel-count">${fmtCount(state.selected.size)}</b> selected <span aria-hidden="true">·</span> <b id="tx-match-count">—</b> matching filters</div></div>
     <div class="tx-alloc-actions"><select id="bulk-reviewer" aria-label="Reviewer or team lead">${reviewers.length?`<option value="">Choose reviewer or team lead…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}${r.role==='TEAM_LEAD'?' (Team Lead)':''}</option>`).join('')}`:'<option value="">No reviewers or team leads yet — add one in Administration</option>'}</select>
-    <button id="bulk-assign" class="btn btn-ghost-dark">Allocate selected</button><button id="bulk-assign-all" class="btn btn-accent" disabled>Assign all matching</button><button type="button" id="tx-import-assign" class="btn btn-soft">Import assignments</button></div>
+    <button id="bulk-assign" class="btn btn-ghost-dark">Allocate selected</button><button id="bulk-assign-all" class="btn btn-accent" disabled>Assign all matching</button><button type="button" id="tx-import-assign" class="btn btn-soft">Import assignments</button><button type="button" id="bulk-unassign" class="btn btn-ghost-dark">Unassign selected</button><button type="button" id="bulk-unassign-all" class="btn btn-ghost-dark" disabled>Unassign all matching</button></div>
   </section>`:''}
   <div id="tx-results" class="tx-results"></div>
   ${manage?`<div id="tx-bulkbar" class="tx-bulkbar" role="region" aria-label="Selected transactions" hidden><span class="tx-bulkbar-count"><b id="tx-bulk-count">0</b> selected</span><select id="tx-bulk-reviewer" aria-label="Reviewer or team lead for selected">${reviewers.length?`<option value="">Allocate to…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}${r.role==='TEAM_LEAD'?' (Team Lead)':''}</option>`).join('')}`:'<option value="">No reviewers or team leads yet</option>'}</select><button id="tx-bulk-allocate" type="button" class="btn btn-accent">Allocate</button><button id="tx-bulk-clear" type="button" class="btn btn-ghost-dark">Clear</button></div>`:''}`;
@@ -405,6 +405,20 @@ async function renderTransactions(c){
     document.querySelector('#tx-bulk-allocate').onclick=()=>allocateSelected(Number(document.querySelector('#tx-bulk-reviewer').value));
     document.querySelector('#tx-bulk-clear').onclick=()=>{state.selected.clear();document.querySelectorAll('.tx-check').forEach(b=>{b.checked=false;b.closest('tr')?.classList.remove('is-selected')});const all=document.querySelector('#tx-check-all');if(all)all.checked=false;syncTxSelection()};
     document.querySelector('#tx-import-assign').onclick=()=>openAssignImportModal(c);
+    const unassignResultMsg=r=>`${fmtCount(r.unassigned)} transaction(s) unassigned${r.skippedFinal?` · ${fmtCount(r.skippedFinal)} already final, skipped`:''}${r.skippedUnassigned?` · ${fmtCount(r.skippedUnassigned)} already unassigned`:''}`;
+    const unassignAllMatching=async()=>{
+      const total=state.txTotal||0;
+      if(!confirm(`Unassign all ${fmtCount(total)} matching transaction(s)? Approved/rejected ones are skipped.`))return;
+      const filter={};for(const k of TX_FILTER_KEYS)if(f[k])filter[k]=f[k];
+      try{const r=await post('/api/unassign',{filter,expected_count:total});state.selected.clear();state.filterOptions=null;toast(unassignResultMsg(r));renderTransactions(c)}catch(e){toast(e.message,true)}
+    };
+    document.querySelector('#bulk-unassign-all').onclick=unassignAllMatching;
+    document.querySelector('#bulk-unassign').onclick=async()=>{
+      if(state.selected.allMatching)return unassignAllMatching();
+      if(!state.selected.size)return toast('Tick at least one transaction',true);
+      if(!confirm(`Unassign ${fmtCount(state.selected.size)} selected transaction(s)?`))return;
+      try{const r=await post('/api/unassign',{transaction_ids:[...state.selected]});state.selected.clear();state.filterOptions=null;toast(unassignResultMsg(r));renderTransactions(c)}catch(e){toast(e.message,true)}
+    };
   }
   if(canSeeTeam())renderTxSync(c).catch(e=>{const el=document.querySelector('#tx-sync');if(el)el.innerHTML=`<div class="tx-sync-status"><span class="dot warn"></span>${esc(e.message)}</div>`});
   await loadTxResults(c);
@@ -603,6 +617,7 @@ async function loadTxResults(c){
   if(manage){
     document.querySelector('#tx-match-count').textContent=fmtCount(p.total);
     const all=document.querySelector('#bulk-assign-all');all.disabled=!p.total;all.textContent=`Assign all ${fmtCount(p.total)} matching`;
+    const unassignAll=document.querySelector('#bulk-unassign-all');unassignAll.disabled=!p.total;unassignAll.textContent=`Unassign all ${fmtCount(p.total)} matching`;
   }
   out.classList.remove('is-loading');
   renderTxInsights(c,p);
@@ -736,6 +751,23 @@ openTransaction=async function(id){
         document.querySelector('#tx-modal')?.remove();state.modal=null;
         toast('Review work deleted. The transaction is back in the queue.');
         await renderPage();await openTransaction(tx.id);
+      }catch(e){toast(e.message,true)}
+    });
+  }
+  // Send it back to Unassigned without touching any decision/notes/time —
+  // unlike Delete review work, this is for "wrong person has it", not "redo
+  // the review". Hidden once a decision is final; reassigning instead
+  // overwrites the reviewer directly from the Transactions list.
+  if(canManage()&&tx.reviewer_id&&!['APPROVED','REJECTED'].includes(tx.status)){
+    const reviewerMeta=[...document.querySelectorAll('.meta-grid .meta')].find(m=>m.querySelector('span')?.textContent==='Reviewer');
+    reviewerMeta?.insertAdjacentHTML('beforeend',`<button type="button" id="unassign-tx" class="btn btn-ghost adm-btn-sm" style="margin-top:6px">Unassign</button>`);
+    document.querySelector('#unassign-tx')?.addEventListener('click',async()=>{
+      if(!confirm(`Unassign this transaction from ${tx.reviewer_name||'its reviewer'}? It goes back to Unassigned.`))return;
+      try{
+        await post('/api/unassign',{transaction_ids:[tx.id]});
+        document.querySelector('#tx-modal')?.remove();state.modal=null;
+        toast('Transaction unassigned');
+        await renderPage();
       }catch(e){toast(e.message,true)}
     });
   }

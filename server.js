@@ -2464,6 +2464,27 @@ async function api(req,res,url){
       }catch(e){db.exec('ROLLBACK');throw e;}
       return json(res,200,{ok:true,assigned,skipped,total:ready.length});
     }
+    // Send a transaction back to Unassigned — the reverse of /api/assign, same
+    // two modes (explicit ids, or a filter + expected_count for "all
+    // matching"). Approved/rejected transactions and anything already
+    // unassigned are left alone and counted separately, not errored.
+    if(req.method==='POST'&&url.pathname==='/api/unassign'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;const b=await readJson(req);
+      const t=iso();const clear=db.prepare("UPDATE transactions SET reviewer_id=NULL,allocated_by=NULL,allocated_at=NULL,allocation_day=NULL,status='UNASSIGNED',updated_at=? WHERE id=?");
+      const run=rows=>{let n=0,skippedFinal=0,skippedUnassigned=0;db.exec('BEGIN');try{for(const r of rows){if(['APPROVED','REJECTED'].includes(r.status)){skippedFinal++;continue;}if(!r.reviewer_id){skippedUnassigned++;continue;}clear.run(t,r.id);audit(r.id,u.id,'UNALLOCATED',{previous_reviewer_id:r.reviewer_id,previous_reviewer_name:r.reviewer_name||null});n++;}db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}return{n,skippedFinal,skippedUnassigned};};
+      if(b.filter&&typeof b.filter==='object'){
+        const params=new URLSearchParams();for(const [k,v] of Object.entries(b.filter))if(v!=null&&v!=='')params.set(k,String(v));
+        const {whereSql,args}=transactionWhere(params);
+        const matched=db.prepare(`SELECT t.id,t.status,t.reviewer_id,u.name reviewer_name FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql}`).all(...args);
+        if(b.expected_count!=null&&Number(b.expected_count)!==matched.length)return json(res,409,{error:`The matching set changed (now ${matched.length} transactions) — refresh the list and try again`,matched:matched.length});
+        const {n,skippedFinal,skippedUnassigned}=run(matched);
+        return json(res,200,{ok:true,unassigned:n,skippedFinal,skippedUnassigned});
+      }
+      const ids=(Array.isArray(b.transaction_ids)?b.transaction_ids:[b.transaction_id]).map(Number).filter(Boolean);if(!ids.length)return json(res,400,{error:'No transactions selected'});
+      const rows=ids.map(id=>rowTx(id)).filter(Boolean);
+      const {n,skippedFinal,skippedUnassigned}=run(rows);
+      return json(res,200,{ok:true,unassigned:n,skippedFinal,skippedUnassigned});
+    }
     const startMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/start$/);
     if(req.method==='POST'&&startMatch){const id=Number(startMatch[1]);const tx=rowTx(id);if(!tx)return json(res,404,{error:'Not found'});if(tx.reviewer_id!==user.id&&!['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(user.role))return json(res,403,{error:'This transaction is not assigned to you'});if(['APPROVED','REJECTED'].includes(tx.status))return json(res,409,{error:'Transaction is already completed'});closeUserOpenSessions(user.id,'SWITCHED');const t=iso();const r=db.prepare('INSERT INTO work_sessions(transaction_id,user_id,started_at,last_heartbeat_at,business_day) VALUES(?,?,?,?,?)').run(id,user.id,t,t,today());db.prepare("UPDATE transactions SET status='IN_REVIEW',updated_at=? WHERE id=?").run(t,id);audit(id,user.id,'VALIDATION_STARTED',{session_id:Number(r.lastInsertRowid)});return json(res,200,{ok:true,sessionId:Number(r.lastInsertRowid),startedAt:t,idleTimeoutSeconds:cfg.idleSeconds});}
     // Reopen an approved/rejected transaction so its check can be redone.
