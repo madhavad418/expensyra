@@ -523,6 +523,12 @@ function initDb() {
   ensureColumn('transactions','historical_category_name','TEXT');
   ensureColumn('transactions','manual_category_name','TEXT');
   ensureColumn('transactions','xpense_id','TEXT');
+  // Xpense ID used to be typed in by hand during review, so older rows (and
+  // anything never reviewed) were left NULL. It's now assigned automatically
+  // for every transaction at ingestion (see upsertTransaction) — backfill
+  // whatever's missing once, keyed off the transaction's own unique id so
+  // it can never collide.
+  db.prepare("UPDATE transactions SET xpense_id='XPS-'||id WHERE xpense_id IS NULL").run();
   // Pleo's own review outcome as shown in the Pleo expense export — reference
   // evidence only; the JSAN decision stays in status/decision/reviews.
   ensureColumn('transactions','pleo_review_status_label','TEXT');
@@ -1044,7 +1050,11 @@ function upsertTransaction(m) {
   const insertFields={...fields, pleo_accounting_entry_id:m.pleo_accounting_entry_id, employee_name:m.employee_name, employee_email:m.employee_email, team_name:m.team_name, employee_code:m.employee_code||null, created_at:t};
   const cols=Object.keys(insertFields);
   const r=db.prepare(`INSERT INTO transactions(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...cols.map(c=>insertFields[c]));
-  return {id:Number(r.lastInsertRowid),inserted:true};
+  const id=Number(r.lastInsertRowid);
+  // Unique Xpense ID assigned the moment a transaction first exists — never
+  // left to a reviewer to type in, so every transaction always has one.
+  db.prepare("UPDATE transactions SET xpense_id='XPS-'||id WHERE id=?").run(id);
+  return {id,inserted:true};
 }
 // Single central recalculation (see docs/ARCHITECTURE.md "Attribution &
 // Resolution Precedence" and lib/precedence.mjs). Reads a transaction's
@@ -1900,7 +1910,9 @@ function pick(r,names){const m=new Map(Object.keys(r).map(k=>[norm(k),r[k]]));fo
 function num(v){const n=Number(String(v||'').replace(/[^0-9.-]/g,''));return Number.isFinite(n)?n:0;}
 function mapRecovery(row,idx){const id=pick(row,['Expense ID','Expense Id','Transaction ID','ID'])||`RECOVERY-${Date.now()}-${idx}`;return{pleo_accounting_entry_id:`recovery:${id}`,pleo_reconciliation_id:id,employee_id:null,employee_name:pick(row,['Employee name','Employee','Cardholder','User name']),employee_email:pick(row,['Employee email','User email','Email'])||null,team_id:null,team_name:pick(row,['Team name','Team'])||null,merchant:pick(row,['Merchant name','Merchant','Supplier'])||null,merchant_country:pick(row,['Merchant country code','Merchant country','Country'])||null,category:pick(row,['Category name','Category'])||null,tags:pick(row,['Tags','Tag'])||'',expense_type:pick(row,['Expense type','Type'])||null,transaction_date:pick(row,['Settled date','Transaction date','Date','Authorised date'])||null,amount:num(pick(row,['Settled amount','Amount','Authorised amount'])),currency:pick(row,['Settled currency','Currency','Authorised currency'])||null,note:pick(row,['Note','Notes','Description'])||null,receipt_count:0,pleo_review_status:pick(row,['Review status'])||null,pleo_status:null,source_mode:'recovery_csv',raw:row,jobId:null};}
 
-function transactionAccess(user,tx){return ['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(user.role) || tx.reviewer_id===user.id;}
+// Every signed-in user can view any transaction's detail — only acting on it
+// (start/review) still requires being the assigned reviewer or a manager.
+function transactionAccess(){return true;}
 function rowTx(id){return db.prepare(`SELECT t.*,u.name reviewer_name,u.email reviewer_email,ap.code attributed_project_code,ap.name attributed_project_name FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id LEFT JOIN projects ap ON ap.id=t.project_id WHERE t.id=?`).get(id);}
 
 // Expands `month=YYYY-MM` into a first/last-day range, or falls back to explicit
@@ -1933,24 +1945,31 @@ function availableCategoryNames(){
     WHERE name IS NOT NULL AND TRIM(name)<>''
     GROUP BY TRIM(name) COLLATE NOCASE ORDER BY name COLLATE NOCASE`).all().map(r=>r.name);
 }
-function transactionList(user,url){
-  const {whereSql,args}=transactionWhere(user,url.searchParams);
+function transactionList(url){
+  const {whereSql,args}=transactionWhere(url.searchParams);
   const limit=Math.min(500,Math.max(1,Number(url.searchParams.get('limit')||200)));
   const offset=Math.max(0,Number(url.searchParams.get('offset')||0));
-  const total=db.prepare(`SELECT COUNT(*) c FROM transactions t ${whereSql}`).get(...args).c;
   const sortKey=TX_SORTS[url.searchParams.get('sort')]?url.searchParams.get('sort'):'date';
   const dir=url.searchParams.get('dir')==='asc'?'ASC':'DESC';
   const rows=db.prepare(`SELECT t.*,u.name reviewer_name,${EFFECTIVE_PROJECT_SQL} effective_project_code FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql} ORDER BY ${TX_SORTS[sortKey]} ${dir},t.id ${dir} LIMIT ? OFFSET ?`).all(...args,limit,offset);
   const names=new Map(db.prepare('SELECT code,name FROM projects').all().map(p=>[p.code,p.name]));
   for(const r of rows) r.effective_project_name=r.effective_project_code?(names.get(r.effective_project_code)||r.effective_project_code):null;
-  const pendingTotal=user.role==='REVIEWER'?db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING' AND reviewer_id=?").get(user.id).n:db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING'").get().n;
+  // total/unbilled/gaps all share the exact same filter, so they're computed
+  // in one pass over the matching rows instead of three separate scans.
+  const main=db.prepare(`SELECT COUNT(*) total,
+      COALESCE(SUM(COALESCE(t.pleo_status,'')<>'DELETED' AND (t.pleo_status='PENDING' OR t.bill_currency IS NULL OR t.bill_amount IS NULL)),0) unbilled,
+      COALESCE(SUM(t.project_status='MISSING_PROJECT'),0) noProject,
+      COALESCE(SUM(t.commercial_classification IS NULL),0) unclassified
+    FROM transactions t ${whereSql}`).get(...args);
+  const total=main.total,gaps={noProject:main.noProject,unclassified:main.unclassified},unbilled=main.unbilled;
+  const pendingTotal=db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING'").get().n;
   const evidenceParams=new URLSearchParams(url.searchParams);evidenceParams.delete('receipt_status');
-  const evidenceWhere=transactionWhere(user,evidenceParams);
+  const evidenceWhere=transactionWhere(evidenceParams);
   const evidenceCounts=db.prepare(`SELECT COUNT(*) total,COALESCE(SUM(t.receipt_count>0),0) present,COALESCE(SUM(t.receipt_count=0),0) missing FROM transactions t ${evidenceWhere.whereSql}`).get(...evidenceWhere.args);
   // Status tab counts ignore the status filter itself, so every tab shows
   // what it would contain with the other filters kept.
   const statusParams=new URLSearchParams(url.searchParams);statusParams.delete('status');
-  const statusWhere=transactionWhere(user,statusParams);
+  const statusWhere=transactionWhere(statusParams);
   const statusCounts=Object.fromEntries(db.prepare(`SELECT t.status,COUNT(*) n FROM transactions t ${statusWhere.whereSql} GROUP BY t.status`).all(...statusWhere.args).map(r=>[r.status,r.n]));
   // Billed spending of the matching set, by the same rules as Expense
   // Intelligence (lib/expense-summary.mjs): Pleo billed amount, sign flipped so
@@ -1959,8 +1978,6 @@ function transactionList(user,url){
   // So a month filter here shows the same figure as that month's Total spending.
   const spendWhere=`${whereSql?whereSql+' AND':'WHERE'} ${TX_SPENDING_SQL}`;
   const totals=db.prepare(`SELECT t.bill_currency currency,COUNT(*) n,COALESCE(SUM(-t.bill_amount),0) amount FROM transactions t ${spendWhere} GROUP BY 1 ORDER BY n DESC`).all(...args);
-  const unbilled=db.prepare(`SELECT COUNT(*) n FROM transactions t ${whereSql?whereSql+' AND':'WHERE'} COALESCE(t.pleo_status,'')<>'DELETED' AND (t.pleo_status='PENDING' OR t.bill_currency IS NULL OR t.bill_amount IS NULL)`).get(...args).n;
-  const gaps=db.prepare(`SELECT COALESCE(SUM(t.project_status='MISSING_PROJECT'),0) noProject,COALESCE(SUM(t.commercial_classification IS NULL),0) unclassified FROM transactions t ${whereSql}`).get(...args);
   return {rows,total,pendingTotal,evidenceCounts,statusCounts,totals,unbilled,gaps,sort:sortKey,dir:dir.toLowerCase(),limit,offset,page:Math.floor(offset/limit)+1,totalPages:Math.max(1,Math.ceil(total/limit))};
 }
 // Which rows count as spending — must stay in step with summarizeExpenses().
@@ -1981,13 +1998,21 @@ const TX_SORTS={
 };
 // Shared by the transaction list and filter-based bulk allocation, so
 // "Assign all matching" always acts on exactly the set the list showed.
-function transactionWhere(user,params){
-  const wh=[],args=[]; if(user.role==='REVIEWER'){wh.push('t.reviewer_id=?');args.push(user.id);} const status=params.get('status');if(status){wh.push('t.status=?');args.push(status);} const reviewer=params.get('reviewer_id');if(reviewer&&user.role!=='REVIEWER'){wh.push('t.reviewer_id=?');args.push(Number(reviewer));}
+function transactionWhere(params){
+  // Every role sees every transaction here — "visible to everyone" applies
+  // to the list/detail views; who may act on one (start/review) is still
+  // gated separately by reviewer_id/role at the action endpoints.
+  const wh=[],args=[]; const status=params.get('status');if(status){wh.push('t.status=?');args.push(status);} const reviewer=params.get('reviewer_id');if(reviewer){wh.push('t.reviewer_id=?');args.push(Number(reviewer));}
   const q=params.get('q');if(q){wh.push('(t.merchant LIKE ? OR t.employee_name LIKE ? OR t.pleo_accounting_entry_id LIKE ? OR t.pleo_reconciliation_id LIKE ?)');const s=`%${q.slice(0,100)}%`;args.push(s,s,s,s);} const project=params.get('project');if(project){wh.push(`${EFFECTIVE_PROJECT_SQL}=?`);args.push(project);}
   // One person, by Pleo employee id (names aren't unique).
   const employee=params.get('employee');if(employee){wh.push('t.employee_id=?');args.push(employee);}
   const pleoStatus=params.get('pleo_status');if(pleoStatus){wh.push('t.pleo_status=?');args.push(pleoStatus);}
-  const pleoReview=params.get('pleo_review');if(pleoReview){wh.push('t.pleo_review_status=?');args.push(pleoReview);}
+  const pleoReview=params.get('pleo_review');
+  // Status-based approximation only: Pleo Activity history is not synced.
+  // Missing status is unknown, not evidence that review has not started.
+  if(pleoReview==='NOT_STARTED_APPROX'){
+    wh.push('t.pleo_review_status IN (?,?)');args.push('WAITING_FOR_REVIEWER','NOT_SET');
+  }else if(pleoReview){wh.push('t.pleo_review_status=?');args.push(pleoReview);}
   const category=params.get('category');if(category){wh.push('COALESCE(t.resolved_category_name,t.category)=?');args.push(category);}
   const currency=params.get('currency');if(currency){wh.push('t.currency=?');args.push(currency);}
   const commercial=params.get('commercial_classification');if(commercial){wh.push('t.commercial_classification=?');args.push(commercial);}
@@ -2163,6 +2188,8 @@ async function api(req,res,url){
       const isDay=v=>/^\d{4}-\d{2}-\d{2}$/.test(v||'');
       const from=isDay(url.searchParams.get('from'))?url.searchParams.get('from'):null,to=isDay(url.searchParams.get('to'))?url.searchParams.get('to'):null;
       const args=[];let where=`WHERE ${TX_SPENDING_SQL}`;
+      const scopeReview=url.searchParams.get('pleo_review')==='NOT_STARTED_APPROX'?'NOT_STARTED_APPROX':null;
+      if(scopeReview){where+=' AND t.pleo_review_status IN (?,?)';args.push('WAITING_FOR_REVIEWER','NOT_SET');}
       if(from){where+=' AND date(t.transaction_date)>=date(?)';args.push(from);}
       if(to){where+=' AND date(t.transaction_date)<=date(?)';args.push(to);}
       const owner="COALESCE(NULLIF(t.employee_id,''),NULLIF(t.employee_email,''),NULLIF(t.employee_name,''),'UNKNOWN')";
@@ -2222,7 +2249,7 @@ async function api(req,res,url){
       const byKey=new Map(projects.map(p=>[key(p),p]));
       for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
       if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
-      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts},coverage:{first:coverage.first_day||null,last:coverage.last_day||null},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts,pleo_review:scopeReview},coverage:{first:coverage.first_day||null,last:coverage.last_day||null},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
     }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and
@@ -2277,7 +2304,7 @@ async function api(req,res,url){
       const valid=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v;
       if(!valid(from)||!valid(to)||from>to)return json(res,400,{error:'Select valid From and To dates in order.'});
       const params=new URLSearchParams({dateFrom:from,dateTo:to});
-      const {whereSql,args}=transactionWhere(user,params);
+      const {whereSql,args}=transactionWhere(params);
       const rows=db.prepare(`SELECT t.*,u.name reviewer_name,${EFFECTIVE_PROJECT_SQL} effective_project_code FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql} ORDER BY t.transaction_date,t.id`).all(...args);
       const projects=new Map(db.prepare('SELECT code,name FROM projects').all().map(p=>[p.code,p.name]));
       for(const row of rows)row.effective_project_name=projects.get(row.effective_project_code)||row.team_name||'';
@@ -2287,7 +2314,7 @@ async function api(req,res,url){
       const file=exportWorkbook(rows,columns);
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':`attachment; filename="PleoExported_Data_${from}_to_${to}.xlsx"`,'Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
-    if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(user,url));
+    if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url));
     const txMatch=url.pathname.match(/^\/api\/transactions\/(\d+)$/);
     if(req.method==='GET'&&txMatch){const tx=rowTx(Number(txMatch[1]));if(!tx)return json(res,404,{error:'Transaction not found'});if(!transactionAccess(user,tx))return json(res,403,{error:'Not assigned to you'});const sessions=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? ORDER BY id DESC').all(tx.id);const reviews=db.prepare('SELECT r.*,u.name reviewer_name FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.transaction_id=? ORDER BY r.id DESC').all(tx.id);const auditRows=db.prepare('SELECT a.*,u.name actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id WHERE a.transaction_id=? ORDER BY a.id DESC LIMIT 100').all(tx.id).map(a=>({...a,detail:safeJson(a.detail,{})}));const attachments=db.prepare('SELECT id,file_key,receipt_id,mime_type,size_bytes,fetched_at,fetch_error,CASE WHEN cache_path IS NULL THEN 0 ELSE 1 END cached FROM pleo_attachments WHERE transaction_id=? ORDER BY id').all(tx.id);
       // One list for the UI: live Pleo receipts (viewed on demand, nothing
@@ -2334,14 +2361,14 @@ async function api(req,res,url){
       return json(res,200,{projects,pleoReview,missingProject,employees});
     }
     if(req.method==='POST'&&url.pathname==='/api/assign'){
-      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;const b=await readJson(req);const reviewer=db.prepare("SELECT * FROM users WHERE id=? AND active=1 AND role='REVIEWER'").get(Number(b.reviewer_id));if(!reviewer)return json(res,400,{error:'Valid reviewer is required'});
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;const b=await readJson(req);const reviewer=db.prepare("SELECT * FROM users WHERE id=? AND active=1 AND role IN ('REVIEWER','TEAM_LEAD')").get(Number(b.reviewer_id));if(!reviewer)return json(res,400,{error:'Valid reviewer or team lead is required'});
       // Filter-based bulk allocation ("Assign all N matching"): the same
       // transactionWhere() the list used, re-evaluated now. expected_count is
       // the total the manager saw — if a sync/another allocation changed the
       // set since, refuse rather than assign something they didn't see.
       if(b.filter&&typeof b.filter==='object'){
         const params=new URLSearchParams();for(const [k,v] of Object.entries(b.filter))if(v!=null&&v!=='')params.set(k,String(v));
-        const {whereSql,args}=transactionWhere(u,params);
+        const {whereSql,args}=transactionWhere(params);
         const matched=db.prepare(`SELECT t.id,t.status FROM transactions t ${whereSql}`).all(...args);
         if(b.expected_count!=null&&Number(b.expected_count)!==matched.length)return json(res,409,{error:`The matching set changed (now ${matched.length} transactions) — refresh the list and try again`,matched:matched.length});
         const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
@@ -2387,7 +2414,7 @@ async function api(req,res,url){
       try{
         db.prepare('DELETE FROM reviews WHERE transaction_id=?').run(id);
         db.prepare('DELETE FROM work_sessions WHERE transaction_id=?').run(id);
-        db.prepare('UPDATE transactions SET status=?,decision=NULL,commercial_classification=NULL,project_code=NULL,reviewer_notes=NULL,xpense_id=NULL,salary_deduction_amount=NULL,completed_at=NULL,completion_day=NULL,updated_at=? WHERE id=?').run(status,t,id);
+        db.prepare('UPDATE transactions SET status=?,decision=NULL,commercial_classification=NULL,project_code=NULL,reviewer_notes=NULL,salary_deduction_amount=NULL,completed_at=NULL,completion_day=NULL,updated_at=? WHERE id=?').run(status,t,id);
         // A category the reviewer typed in goes too (the next sync re-resolves it).
         if(tx.category_resolution_source==='MANUAL_REVIEW')db.prepare('UPDATE transactions SET manual_category_name=NULL,resolved_category_name=NULL,category_resolution_source=NULL WHERE id=?').run(id);
         // A reviewer-chosen project (MANUAL) falls back to what approved rules give.
@@ -2418,7 +2445,7 @@ async function api(req,res,url){
       if(!s||Date.now()-Date.parse(s.last_heartbeat_at)>cfg.idleSeconds*1000){if(s)closeSession(s,'IDLE_TIMEOUT',new Date());return json(res,409,{error:'Click Start validation before editing or submitting a decision.'});}
       closeSession(s,'REVIEW_ACTION',new Date());const total=sessionSecondsForTxUser(id,user.id),used=reviewedSecondsForTxUser(id,user.id),reviewSecs=Math.max(0,total-used),t=iso(),day=today();
       db.prepare('INSERT INTO reviews(transaction_id,user_id,decision,commercial_classification,project_code,notes,review_seconds,business_day,created_at,salary_deduction_amount) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,user.id,decision,classification,b.project_code||null,clampText(b.notes,4000)||null,reviewSecs,day,t,salaryDeduction);
-      const finalStatus=decision;const completed=['APPROVED','REJECTED'].includes(decision);const manualCategory=clampText(b.manual_category_name,200)?.trim()||null;const xpenseId=clampText(b.xpense_id,500)?.trim()||null;db.prepare(`UPDATE transactions SET status=?,decision=?,commercial_classification=?,project_code=?,reviewer_notes=?,manual_category_name=COALESCE(?,manual_category_name),resolved_category_name=COALESCE(?,resolved_category_name),category_resolution_source=CASE WHEN ? IS NOT NULL THEN 'MANUAL_REVIEW' ELSE category_resolution_source END,xpense_id=?,salary_deduction_amount=?,completed_at=?,completion_day=?,updated_at=? WHERE id=?`).run(finalStatus,decision,classification,b.project_code||null,clampText(b.notes,4000)||null,manualCategory,manualCategory,manualCategory,xpenseId,salaryDeduction,completed?t:null,completed?day:null,t,id);
+      const finalStatus=decision;const completed=['APPROVED','REJECTED'].includes(decision);const manualCategory=clampText(b.manual_category_name,200)?.trim()||null;db.prepare(`UPDATE transactions SET status=?,decision=?,commercial_classification=?,project_code=?,reviewer_notes=?,manual_category_name=COALESCE(?,manual_category_name),resolved_category_name=COALESCE(?,resolved_category_name),category_resolution_source=CASE WHEN ? IS NOT NULL THEN 'MANUAL_REVIEW' ELSE category_resolution_source END,salary_deduction_amount=?,completed_at=?,completion_day=?,updated_at=? WHERE id=?`).run(finalStatus,decision,classification,b.project_code||null,clampText(b.notes,4000)||null,manualCategory,manualCategory,manualCategory,salaryDeduction,completed?t:null,completed?day:null,t,id);
       // A reviewer-chosen project is MANUAL attribution — the top precedence tier, so no later sync or mapping rule can override it. Applied directly rather than via mergeProjectAttribution(): a human re-review changing their own earlier choice is a correction, not a same-tier conflict. No project chosen → attribution is left as-is.
       if(reviewProject){db.prepare(`UPDATE transactions SET project_id=?,project_attribution_source='MANUAL',project_attributed_at=?,project_attributed_by=?,project_mapping_rule_id=NULL,project_status='ASSIGNED' WHERE id=?`).run(reviewProject.id,t,user.id,id);}
       recalculateTransactionQuality(id);

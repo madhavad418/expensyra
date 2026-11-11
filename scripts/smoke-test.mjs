@@ -102,11 +102,11 @@ try{
   await req('/api/auth/change-password',{method:'POST',cookie:reviewerCookie,body:{current_password:'TempPassword!2026',new_password:'ReviewerNew!2026'}});
 
   x=await req('/api/transactions?limit=50',{cookie:reviewerCookie});
-  if(x.p.rows.length!==1) fail(`Reviewer should see 1 assigned transaction, got ${x.p.rows.length}`);
+  if(x.p.rows.length!==18) fail(`Reviewer should see all 18 transactions, got ${x.p.rows.length}`);
   x=await req(`/api/transactions/${txId}/start`,{method:'POST',cookie:reviewerCookie});
   await new Promise(r=>setTimeout(r,1200));
   await req(`/api/transactions/${txId}/heartbeat`,{method:'POST',cookie:reviewerCookie});
-  x=await req(`/api/transactions/${txId}/review`,{method:'POST',cookie:reviewerCookie,body:{decision:'APPROVED',commercial_classification:'PROJECT_COST',project_code:manualProject.code,notes:'Smoke test validation',manual_category_name:'Smoke category override',xpense_id:'XPS-42'}});
+  x=await req(`/api/transactions/${txId}/review`,{method:'POST',cookie:reviewerCookie,body:{decision:'APPROVED',commercial_classification:'CUSTOMER_BILLABLE',project_code:manualProject.code,notes:'Smoke test validation',manual_category_name:'Smoke category override'}});
   if(x.p.decision!=='APPROVED') fail('Review did not complete');
 
   // Reviewer's project choice is recorded as MANUAL attribution and survives a re-sync.
@@ -114,7 +114,7 @@ try{
     const d=await req(`/api/transactions/${txId}`,{cookie:adminCookie});
     const t=d.p.tx;
     if(t.project_attribution_source!=='MANUAL'||t.project_id!==manualProject.id||t.project_status!=='ASSIGNED'||t.dq_missing_project!==0||t.project_code!==manualProject.code) fail(`${label}: manual attribution wrong: ${JSON.stringify(t)}`);
-    if(t.manual_category_name!=='Smoke category override'||t.resolved_category_name!=='Smoke category override'||t.xpense_id!=='XPS-42') fail(`${label}: manual category or Xpense ID did not persist: ${JSON.stringify(t)}`);
+    if(t.manual_category_name!=='Smoke category override'||t.resolved_category_name!=='Smoke category override'||t.xpense_id!==`XPS-${txId}`) fail(`${label}: manual category or Xpense ID did not persist: ${JSON.stringify(t)}`);
   };
   await checkManual('after review');
   x=await req('/api/pleo/sync',{method:'POST',cookie:adminCookie});

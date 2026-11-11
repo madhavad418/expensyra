@@ -1330,3 +1330,22 @@ ol.sdb-rank li:nth-child(-n+3) .sdb-pos{background:#e8f1fd;color:var(--jsan-prim
 .sdb-tools{margin-left:0}
 }
 @media(prefers-reduced-motion:reduce){.sdb-side,.sdb-meta{transition:none;animation:none}.sdb-meta-icon.running svg{animation:none}}
+
+/* Spend dashboard: review scope selector. */
+.sdb-review-filter{display:flex;align-items:center;flex-wrap:wrap;gap:16px 24px;padding:18px 22px;margin-bottom:22px;background:linear-gradient(110deg,#f0f6ff,#fff 65%);border:1px solid #d7e4f4;border-radius:18px;box-shadow:0 4px 16px #163a6410}
+.sdb-review-heading{display:flex;align-items:center;gap:12px;flex:1 1 280px}
+.sdb-review-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:#e1edfc;color:var(--jsan-primary)}
+.sdb-review-heading h3{margin:0;font-size:14px;font-weight:700;color:var(--jsan-text-primary)}
+.sdb-review-heading p{margin:3px 0 0;font-size:12px;color:var(--jsan-text-muted)}
+.sdb-review-badge{padding:4px 8px;border-radius:7px;background:#fff3db;color:#805315;font-size:10px;font-weight:700;letter-spacing:.03em}
+.sdb-review-switch{display:flex;gap:5px;padding:5px;background:#e9eff7;border:1px solid #dce5ef;border-radius:13px}
+.sdb-review-switch button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 17px;border:0;border-radius:9px;background:transparent;color:#52657b;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s,color .15s,box-shadow .15s}
+.sdb-review-switch button:hover{background:#f8fbff;color:var(--jsan-primary)}
+.sdb-review-switch button.on{background:var(--jsan-primary);color:white;box-shadow:0 3px 8px #004c9926}
+.sdb-review-dot{width:7px;height:7px;border:1.5px solid currentColor;border-radius:50%;opacity:.65}
+.sdb-review-switch button.on .sdb-review-dot{background:currentColor;opacity:1}
+.sdb-review-switch button:focus-visible,.sdb-review-info summary:focus-visible{outline:2px solid var(--jsan-primary);outline-offset:3px}
+.sdb-review-info{flex-basis:100%;border-top:1px solid #dce6f3;padding-top:10px;color:var(--jsan-text-muted);font-size:12px}
+.sdb-review-info summary{cursor:pointer;width:fit-content;font-weight:600}
+.sdb-review-info p{max-width:780px;margin:8px 0 0;line-height:1.6}
+@media(max-width:640px){.sdb-review-filter{padding:16px;gap:14px}.sdb-review-heading{flex-basis:100%}.sdb-review-switch{width:100%}.sdb-review-switch button{flex:1;padding:0 10px;font-size:12px}.sdb-review-badge{margin-left:auto}}
