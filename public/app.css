@@ -643,6 +643,10 @@ button.adm-row:focus-visible{outline:2px solid var(--jsan-primary);outline-offse
 .adm-pill{font-size:12px;font-weight:700;padding:6px 12px;border-radius:var(--jsan-radius-full);white-space:nowrap}
 .adm-pill.ok{background:var(--jsan-ok-bg);color:var(--jsan-ok)}
 .adm-pill.warn{background:var(--jsan-warn-bg);color:var(--jsan-warn)}
+.adm-pill.bad{background:var(--jsan-bad-bg);color:var(--jsan-bad)}
+.adm-pill.neutral{background:var(--jsan-neutral-bg);color:var(--jsan-neutral)}
+.assign-import-chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.assign-import-table{max-height:420px;overflow:auto;margin-top:4px}
 .adm-checks{list-style:none;margin:0 0 18px;padding:0;display:grid;gap:9px;font-size:13.5px;color:var(--jsan-text-primary);line-height:1.55}
 .adm-checks li{position:relative;padding-left:26px}
 .adm-checks li::before{content:"\2713";position:absolute;left:0;top:1px;width:18px;height:18px;display:grid;place-items:center;border-radius:50%;background:var(--jsan-ok-bg);color:var(--jsan-ok);font-size:11px;font-weight:800}

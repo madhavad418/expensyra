@@ -2059,6 +2059,55 @@ function expenseFilters(url){
   return {where, args:[from,to,project,category,currency,commercial,status,reviewerId,merchant,receiptStatus,projectStatus], from, to};
 }
 
+// === Assignment import — assign transactions in bulk from a Receipt/Owner/
+// Pleo Reviewer/Expense ID spreadsheet (Excel or CSV) ===
+// Expense ID is matched against pleo_accounting_entry_id exactly like the
+// Pleo Excel import above; Owner is cross-checked against the transaction's
+// own employee_name as a safety check before any assignment happens, and
+// Pleo Reviewer is resolved to an active Reviewer/Team Lead by name. Receipt
+// isn't matched against anything JSAN stores — it's carried through purely
+// for the uploader to cross-reference their own source file.
+const ASSIGN_IMPORT_REQUIRED=['Receipt','Owner','Pleo Reviewer','Expense ID'];
+const hasCol=(row,name)=>Object.keys(row).some(k=>norm(k)===norm(name));
+function rowsFromUpload(buffer,filename){
+  if(/\.(csv|txt)$/i.test(filename||'')) return parseCsv(buffer.toString('utf8'));
+  let sheet; try{ sheet=readFirstSheet(buffer); }catch(e){ throw Object.assign(new Error(`Could not read the file: ${e.message}`),{status:400}); }
+  const hdr=(sheet.rows[0]||[]).map(h=>String(h??'').trim());
+  return sheet.rows.slice(1).filter(r=>r.some(v=>String(v??'').trim())).map(r=>Object.fromEntries(hdr.map((h,i)=>[h,String(r[i]??'').trim()])));
+}
+function buildAssignmentImportPreview(rows){
+  if(!rows.length) throw Object.assign(new Error('The file has no data rows'),{status:400});
+  const missing=ASSIGN_IMPORT_REQUIRED.filter(name=>!hasCol(rows[0],name));
+  if(missing.length) throw Object.assign(new Error(`Missing column(s): ${missing.join(', ')}`),{status:400});
+  const assignable=db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('REVIEWER','TEAM_LEAD')").all();
+  const normName=s=>String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const findTx=db.prepare('SELECT id,employee_name,status,reviewer_id FROM transactions WHERE pleo_accounting_entry_id=?');
+  const out=rows.map((r,idx)=>{
+    const receipt=pick(r,['Receipt']),owner=pick(r,['Owner']),pleoReviewer=pick(r,['Pleo Reviewer']),expenseId=pick(r,['Expense ID','Expense Id']);
+    const base={row:idx+2,receipt,owner,pleoReviewer,expenseId};
+    if(!expenseId) return {...base,status:'NOT_FOUND',reason:'No Expense ID in this row'};
+    const tx=findTx.get(expenseId);
+    if(!tx) return {...base,status:'NOT_FOUND',reason:'No transaction with this Expense ID',txId:null};
+    if(owner&&normName(owner)!==normName(tx.employee_name)) return {...base,status:'OWNER_MISMATCH',reason:`File says "${owner}", transaction's owner is "${tx.employee_name||'—'}"`,txId:tx.id};
+    const exact=assignable.filter(u=>normName(u.name)===normName(pleoReviewer));
+    const candidates=exact.length?exact:assignable.filter(u=>normName(u.name).split(' ').includes(normName(pleoReviewer)));
+    if(!candidates.length) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead named "${pleoReviewer}"`,txId:tx.id};
+    if(candidates.length>1) return {...base,status:'REVIEWER_AMBIGUOUS',reason:`"${pleoReviewer}" matches multiple users: ${candidates.map(c=>c.name).join(', ')}`,txId:tx.id};
+    if(['APPROVED','REJECTED'].includes(tx.status)) return {...base,status:'ALREADY_FINAL',reason:'This transaction is already approved/rejected',txId:tx.id};
+    const reviewer=candidates[0];
+    if(tx.reviewer_id===reviewer.id) return {...base,status:'ALREADY_ASSIGNED',reason:`Already assigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
+    return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
+  });
+  const summary={total:out.length};
+  for(const s of ['READY','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','REVIEWER_AMBIGUOUS','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
+  return {rows:out,summary};
+}
+// Parsed preview held server-side, keyed by a one-time token — confirm only
+// needs the token back, and re-checks each row's current state rather than
+// trusting what the preview saw (another admin may have acted on a row since).
+const assignImportPreviews=new Map();
+function pruneAssignImportPreviews(){ const cutoff=Date.now()-30*60*1000; for(const [k,v] of assignImportPreviews) if(v.createdAt<cutoff) assignImportPreviews.delete(k); }
+
 async function api(req,res,url){
   try{
     if(req.method==='GET'&&url.pathname==='/api/health') return json(res,200,{status:'ok',service:'JSAN Expensyra',time:iso(),db:db.dialect,pleoConfigured:pleoConfigured(),syncMode:cfg.pleoSyncMode});
@@ -2378,6 +2427,42 @@ async function api(req,res,url){
         return json(res,200,{ok:true,assigned:n,skippedFinal});
       }
       const ids=(Array.isArray(b.transaction_ids)?b.transaction_ids:[b.transaction_id]).map(Number).filter(Boolean);if(!ids.length)return json(res,400,{error:'No transactions selected'});let n=0;const t=iso(),day=today();for(const id of ids){const tx=rowTx(id);if(!tx)continue;if(['APPROVED','REJECTED'].includes(tx.status)&&!b.force)continue;db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status=CASE WHEN status IN ('APPROVED','REJECTED') THEN status ELSE 'ASSIGNED' END,updated_at=? WHERE id=?").run(reviewer.id,u.id,t,day,t,id);audit(id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name});n++;}return json(res,200,{ok:true,assigned:n});
+    }
+    // Bulk allocation from a Receipt/Owner/Pleo Reviewer/Expense ID spreadsheet
+    // (Excel or CSV): preview matches/mismatches first, confirm only acts on
+    // rows still valid at that moment (see buildAssignmentImportPreview()).
+    if(req.method==='POST'&&url.pathname==='/api/assign/import/preview'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
+      const filename=clampText(req.headers['x-filename']||'assignments.xlsx',240);
+      const buffer=await readBuffer(req,20_000_000);
+      const rows=rowsFromUpload(buffer,filename);
+      const {rows:preview,summary}=buildAssignmentImportPreview(rows);
+      pruneAssignImportPreviews();
+      const token=crypto.randomBytes(16).toString('hex');
+      assignImportPreviews.set(token,{rows:preview,createdAt:Date.now(),userId:u.id,filename});
+      return json(res,200,{token,filename,summary,rows:preview});
+    }
+    if(req.method==='POST'&&url.pathname==='/api/assign/import/confirm'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
+      const b=await readJson(req);const entry=assignImportPreviews.get(String(b.token||''));
+      if(!entry)return json(res,400,{error:'This preview has expired. Upload the file again.'});
+      assignImportPreviews.delete(String(b.token));
+      const ready=entry.rows.filter(r=>r.status==='READY');
+      const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
+      let assigned=0,skipped=0;
+      db.exec('BEGIN');
+      try{
+        for(const r of ready){
+          const tx=rowTx(r.txId);
+          const reviewer=db.prepare("SELECT id,name,active,role FROM users WHERE id=?").get(r.reviewerId);
+          if(!tx||['APPROVED','REJECTED'].includes(tx.status)||!reviewer||!reviewer.active||!['REVIEWER','TEAM_LEAD'].includes(reviewer.role)){skipped++;continue;}
+          upd.run(reviewer.id,u.id,t,day,t,r.txId);
+          audit(r.txId,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId});
+          assigned++;
+        }
+        db.exec('COMMIT');
+      }catch(e){db.exec('ROLLBACK');throw e;}
+      return json(res,200,{ok:true,assigned,skipped,total:ready.length});
     }
     const startMatch=url.pathname.match(/^\/api\/transactions\/(\d+)\/start$/);
     if(req.method==='POST'&&startMatch){const id=Number(startMatch[1]);const tx=rowTx(id);if(!tx)return json(res,404,{error:'Not found'});if(tx.reviewer_id!==user.id&&!['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(user.role))return json(res,403,{error:'This transaction is not assigned to you'});if(['APPROVED','REJECTED'].includes(tx.status))return json(res,409,{error:'Transaction is already completed'});closeUserOpenSessions(user.id,'SWITCHED');const t=iso();const r=db.prepare('INSERT INTO work_sessions(transaction_id,user_id,started_at,last_heartbeat_at,business_day) VALUES(?,?,?,?,?)').run(id,user.id,t,t,today());db.prepare("UPDATE transactions SET status='IN_REVIEW',updated_at=? WHERE id=?").run(t,id);audit(id,user.id,'VALIDATION_STARTED',{session_id:Number(r.lastInsertRowid)});return json(res,200,{ok:true,sessionId:Number(r.lastInsertRowid),startedAt:t,idleTimeoutSeconds:cfg.idleSeconds});}

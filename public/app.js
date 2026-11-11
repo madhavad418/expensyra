@@ -317,7 +317,7 @@ async function renderTransactions(c){
   ${manage?`<section class="tx-alloc" aria-label="Allocate work">
     <div><div class="kicker">Allocate work</div><div class="tx-alloc-meta"><b id="tx-sel-count">${fmtCount(state.selected.size)}</b> selected <span aria-hidden="true">·</span> <b id="tx-match-count">—</b> matching filters</div></div>
     <div class="tx-alloc-actions"><select id="bulk-reviewer" aria-label="Reviewer or team lead">${reviewers.length?`<option value="">Choose reviewer or team lead…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}${r.role==='TEAM_LEAD'?' (Team Lead)':''}</option>`).join('')}`:'<option value="">No reviewers or team leads yet — add one in Administration</option>'}</select>
-    <button id="bulk-assign" class="btn btn-ghost-dark">Allocate selected</button><button id="bulk-assign-all" class="btn btn-accent" disabled>Assign all matching</button></div>
+    <button id="bulk-assign" class="btn btn-ghost-dark">Allocate selected</button><button id="bulk-assign-all" class="btn btn-accent" disabled>Assign all matching</button><button type="button" id="tx-import-assign" class="btn btn-soft">Import assignments</button></div>
   </section>`:''}
   <div id="tx-results" class="tx-results"></div>
   ${manage?`<div id="tx-bulkbar" class="tx-bulkbar" role="region" aria-label="Selected transactions" hidden><span class="tx-bulkbar-count"><b id="tx-bulk-count">0</b> selected</span><select id="tx-bulk-reviewer" aria-label="Reviewer or team lead for selected">${reviewers.length?`<option value="">Allocate to…</option>${reviewers.map(r=>`<option value="${r.id}">${esc(r.name)}${r.role==='TEAM_LEAD'?' (Team Lead)':''}</option>`).join('')}`:'<option value="">No reviewers or team leads yet</option>'}</select><button id="tx-bulk-allocate" type="button" class="btn btn-accent">Allocate</button><button id="tx-bulk-clear" type="button" class="btn btn-ghost-dark">Clear</button></div>`:''}`;
@@ -404,6 +404,7 @@ async function renderTransactions(c){
     document.querySelector('#bulk-assign').onclick=()=>{const rid=chosenReviewer();if(rid)allocateSelected(rid)};
     document.querySelector('#tx-bulk-allocate').onclick=()=>allocateSelected(Number(document.querySelector('#tx-bulk-reviewer').value));
     document.querySelector('#tx-bulk-clear').onclick=()=>{state.selected.clear();document.querySelectorAll('.tx-check').forEach(b=>{b.checked=false;b.closest('tr')?.classList.remove('is-selected')});const all=document.querySelector('#tx-check-all');if(all)all.checked=false;syncTxSelection()};
+    document.querySelector('#tx-import-assign').onclick=()=>openAssignImportModal(c);
   }
   if(canSeeTeam())renderTxSync(c).catch(e=>{const el=document.querySelector('#tx-sync');if(el)el.innerHTML=`<div class="tx-sync-status"><span class="dot warn"></span>${esc(e.message)}</div>`});
   await loadTxResults(c);
@@ -446,6 +447,60 @@ function renderRemovalPopover(c,pop,close){
     }catch(e){result.innerHTML=`<div class="tx-removal-note warn">${esc(e.message)}</div>`}finally{previewBtn.disabled=false}
   };
   m.querySelector('#remove-import-from').focus();
+}
+// Import assignments (Receipt/Owner/Pleo Reviewer/Expense ID file): preview
+// shows every row's match outcome before anything is written, confirm then
+// re-checks each row server-side rather than trusting the preview is still
+// fresh (another admin may have acted on one of these rows meanwhile).
+const ASSIGN_IMPORT_STATUS={
+  READY:{label:'Will assign',tone:'ok'}, ALREADY_ASSIGNED:{label:'Already assigned',tone:'neutral'},
+  ALREADY_FINAL:{label:'Already final',tone:'neutral'}, OWNER_MISMATCH:{label:'Owner mismatch',tone:'bad'},
+  REVIEWER_NOT_FOUND:{label:'Reviewer not found',tone:'bad'}, REVIEWER_AMBIGUOUS:{label:'Reviewer ambiguous',tone:'bad'},
+  NOT_FOUND:{label:'Expense ID not found',tone:'bad'},
+};
+function openAssignImportModal(c){
+  document.body.insertAdjacentHTML('beforeend',`<div id="assign-import-modal" class="modal-wrap"><div class="modal" style="max-width:920px">
+    <div class="modal-head"><div><div class="kicker">Allocate work</div><h3>Import assignments</h3></div><button id="ai-close" class="close">×</button></div>
+    <div class="modal-body">
+      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned, and Pleo Reviewer is matched to an active reviewer or team lead by name.</p>
+      <label class="adm-drop" for="ai-file"><input id="ai-file" type="file" accept=".xlsx,.csv"><span class="adm-drop-icon" aria-hidden="true">⬆</span><b id="ai-file-name">Choose a file (.xlsx or .csv)</b><small>Preview first — nothing is assigned until you confirm.</small></label>
+      <div class="adm-actions"><button type="button" id="ai-preview" class="btn btn-soft">Preview</button><button type="button" id="ai-confirm" class="btn btn-primary" disabled>Confirm assignment</button></div>
+      <div id="ai-result" aria-live="polite"></div>
+    </div>
+  </div></div>`);
+  const modal=document.querySelector('#assign-import-modal');
+  const close=()=>modal.remove();
+  modal.querySelector('#ai-close').onclick=close;
+  modal.addEventListener('click',e=>{if(e.target===modal)close()});
+  const result=modal.querySelector('#ai-result'),confirmBtn=modal.querySelector('#ai-confirm'),fileInput=modal.querySelector('#ai-file');
+  let token=null;
+  fileInput.addEventListener('change',e=>{
+    confirmBtn.disabled=true;token=null;result.innerHTML='';
+    const f=e.currentTarget.files[0];modal.querySelector('#ai-file-name').textContent=f?f.name:'Choose a file (.xlsx or .csv)';
+    e.currentTarget.closest('.adm-drop').classList.toggle('has-file',Boolean(f));
+  });
+  modal.querySelector('#ai-preview').onclick=async()=>{
+    const file=fileInput.files[0];if(!file)return toast('Choose a file first',true);
+    token=null;confirmBtn.disabled=true;result.innerHTML=`<div class="muted small">Checking ${esc(file.name)}…</div>`;
+    try{
+      const r=await api('/api/assign/import/preview',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':file.name},body:file});
+      token=r.token;const s=r.summary;
+      const chip=(key)=>{const n=s[key]||0;if(!n)return'';const st=ASSIGN_IMPORT_STATUS[key];return `<span class="adm-pill ${st.tone}">${fmtCount(n)} ${st.label.toLowerCase()}</span>`};
+      result.innerHTML=`<div class="assign-import-chips">${Object.keys(ASSIGN_IMPORT_STATUS).map(chip).join('')}</div>
+        <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
+      confirmBtn.disabled=!s.READY;
+    }catch(x){result.innerHTML=`<div class="error-box">${esc(x.message)}</div>`}
+  };
+  confirmBtn.onclick=async()=>{
+    if(!token)return;
+    confirmBtn.disabled=true;const original=confirmBtn.textContent;confirmBtn.textContent='Assigning…';
+    try{
+      const r=await post('/api/assign/import/confirm',{token});
+      toast(`${fmtCount(r.assigned)} transaction(s) assigned${r.skipped?` · ${fmtCount(r.skipped)} skipped (changed since preview)`:''}`);
+      close();state.filterOptions=null;await renderTransactions(c);
+    }catch(x){result.insertAdjacentHTML('beforeend',`<div class="error-box">${esc(x.message)}</div>`);confirmBtn.disabled=false;confirmBtn.textContent=original}
+  };
+  fileInput.focus();
 }
 // Daily Pleo sync bar. Admins/team leads can switch the daily run on, pick
 // the time and run it on demand; Finance QC sees the status read-only.
