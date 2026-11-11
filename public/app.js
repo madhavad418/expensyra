@@ -469,14 +469,15 @@ function renderRemovalPopover(c,pop,close){
 const ASSIGN_IMPORT_STATUS={
   READY:{label:'Will assign',tone:'ok'}, ALREADY_ASSIGNED:{label:'Already assigned',tone:'neutral'},
   ALREADY_FINAL:{label:'Already final',tone:'neutral'}, OWNER_MISMATCH:{label:'Owner mismatch',tone:'bad'},
-  REVIEWER_NOT_FOUND:{label:'Reviewer not found',tone:'bad'}, REVIEWER_AMBIGUOUS:{label:'Reviewer ambiguous',tone:'bad'},
+  REVIEWER_NOT_FOUND:{label:'Reviewer not found',tone:'bad'},
   NOT_FOUND:{label:'Expense ID not found',tone:'bad'},
 };
 function openAssignImportModal(c){
   document.body.insertAdjacentHTML('beforeend',`<div id="assign-import-modal" class="modal-wrap"><div class="modal" style="max-width:920px">
     <div class="modal-head"><div><div class="kicker">Allocate work</div><h3>Import assignments</h3></div><button id="ai-close" class="close">×</button></div>
     <div class="modal-body">
-      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned, and Pleo Reviewer is matched to an active reviewer or team lead by name.</p>
+      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned, and <b>Pleo Reviewer</b> holds that person's <b>email</b> — matched to an active reviewer or team lead, and shown by name once matched.</p>
+      <div class="adm-actions"><button type="button" id="ai-template" class="btn btn-soft">⬇ Download template (.xlsx)</button></div>
       <label class="adm-drop" for="ai-file"><input id="ai-file" type="file" accept=".xlsx,.csv"><span class="adm-drop-icon" aria-hidden="true">⬆</span><b id="ai-file-name">Choose a file (.xlsx or .csv)</b><small>Preview first — nothing is assigned until you confirm.</small></label>
       <div class="adm-actions"><button type="button" id="ai-preview" class="btn btn-soft">Preview</button><button type="button" id="ai-confirm" class="btn btn-primary" disabled>Confirm assignment</button></div>
       <div id="ai-result" aria-live="polite"></div>
@@ -486,6 +487,15 @@ function openAssignImportModal(c){
   const close=()=>modal.remove();
   modal.querySelector('#ai-close').onclick=close;
   modal.addEventListener('click',e=>{if(e.target===modal)close()});
+  modal.querySelector('#ai-template').addEventListener('click',async e=>{
+    e.currentTarget.disabled=true;
+    try{
+      const r=await fetch('/api/assign/import/template');if(!r.ok)throw Error((await r.json()).error||'Download failed');
+      const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download='Expensyra_Assignment_Import_Template.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+      toast('Template downloaded');
+    }catch(x){toast(x.message,true)}finally{e.currentTarget.disabled=false}
+  });
   const result=modal.querySelector('#ai-result'),confirmBtn=modal.querySelector('#ai-confirm'),fileInput=modal.querySelector('#ai-file');
   let token=null;
   fileInput.addEventListener('change',e=>{
@@ -501,7 +511,7 @@ function openAssignImportModal(c){
       token=r.token;const s=r.summary;
       const chip=(key)=>{const n=s[key]||0;if(!n)return'';const st=ASSIGN_IMPORT_STATUS[key];return `<span class="adm-pill ${st.tone}">${fmtCount(n)} ${st.label.toLowerCase()}</span>`};
       result.innerHTML=`<div class="assign-import-chips">${Object.keys(ASSIGN_IMPORT_STATUS).map(chip).join('')}</div>
-        <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
+        <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer (email)</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
       confirmBtn.disabled=!s.READY;
     }catch(x){result.innerHTML=`<div class="error-box">${esc(x.message)}</div>`}
   };

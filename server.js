@@ -2064,9 +2064,11 @@ function expenseFilters(url){
 // Expense ID is matched against pleo_accounting_entry_id exactly like the
 // Pleo Excel import above; Owner is cross-checked against the transaction's
 // own employee_name as a safety check before any assignment happens, and
-// Pleo Reviewer is resolved to an active Reviewer/Team Lead by name. Receipt
-// isn't matched against anything JSAN stores — it's carried through purely
-// for the uploader to cross-reference their own source file.
+// Pleo Reviewer holds that person's email — resolved to an active
+// Reviewer/Team Lead by exact email match (emails are unique, so this can
+// never be ambiguous the way a name could be). Receipt isn't matched against
+// anything JSAN stores — it's carried through purely for the uploader to
+// cross-reference their own source file.
 const ASSIGN_IMPORT_REQUIRED=['Receipt','Owner','Pleo Reviewer','Expense ID'];
 const hasCol=(row,name)=>Object.keys(row).some(k=>norm(k)===norm(name));
 function rowsFromUpload(buffer,filename){
@@ -2079,8 +2081,9 @@ function buildAssignmentImportPreview(rows){
   if(!rows.length) throw Object.assign(new Error('The file has no data rows'),{status:400});
   const missing=ASSIGN_IMPORT_REQUIRED.filter(name=>!hasCol(rows[0],name));
   if(missing.length) throw Object.assign(new Error(`Missing column(s): ${missing.join(', ')}`),{status:400});
-  const assignable=db.prepare("SELECT id,name FROM users WHERE active=1 AND role IN ('REVIEWER','TEAM_LEAD')").all();
+  const assignable=db.prepare("SELECT id,name,email FROM users WHERE active=1 AND role IN ('REVIEWER','TEAM_LEAD')").all();
   const normName=s=>String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
+  const normEmail=s=>String(s||'').trim().toLowerCase();
   const findTx=db.prepare('SELECT id,employee_name,status,reviewer_id FROM transactions WHERE pleo_accounting_entry_id=?');
   const out=rows.map((r,idx)=>{
     const receipt=pick(r,['Receipt']),owner=pick(r,['Owner']),pleoReviewer=pick(r,['Pleo Reviewer']),expenseId=pick(r,['Expense ID','Expense Id']);
@@ -2089,18 +2092,25 @@ function buildAssignmentImportPreview(rows){
     const tx=findTx.get(expenseId);
     if(!tx) return {...base,status:'NOT_FOUND',reason:'No transaction with this Expense ID',txId:null};
     if(owner&&normName(owner)!==normName(tx.employee_name)) return {...base,status:'OWNER_MISMATCH',reason:`File says "${owner}", transaction's owner is "${tx.employee_name||'—'}"`,txId:tx.id};
-    const exact=assignable.filter(u=>normName(u.name)===normName(pleoReviewer));
-    const candidates=exact.length?exact:assignable.filter(u=>normName(u.name).split(' ').includes(normName(pleoReviewer)));
-    if(!candidates.length) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead named "${pleoReviewer}"`,txId:tx.id};
-    if(candidates.length>1) return {...base,status:'REVIEWER_AMBIGUOUS',reason:`"${pleoReviewer}" matches multiple users: ${candidates.map(c=>c.name).join(', ')}`,txId:tx.id};
+    const reviewer=assignable.find(u=>normEmail(u.email)===normEmail(pleoReviewer));
+    if(!reviewer) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead with the email "${pleoReviewer}"`,txId:tx.id};
     if(['APPROVED','REJECTED'].includes(tx.status)) return {...base,status:'ALREADY_FINAL',reason:'This transaction is already approved/rejected',txId:tx.id};
-    const reviewer=candidates[0];
     if(tx.reviewer_id===reviewer.id) return {...base,status:'ALREADY_ASSIGNED',reason:`Already assigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
     return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
   });
   const summary={total:out.length};
-  for(const s of ['READY','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','REVIEWER_AMBIGUOUS','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
+  for(const s of ['READY','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
   return {rows:out,summary};
+}
+// Downloadable template so uploaders know the exact shape expected — two
+// realistic demo rows, never matched to anything (fake Expense IDs), purely
+// for reference.
+function buildAssignmentImportTemplate(){
+  const demo=[
+    {receipt:'2734706',owner:'Shorty Thai',pleoReviewer:'pranathi@example.com',expenseId:'81c2de8b-a947-4d1f-a486-67107be2c84c'},
+    {receipt:'2734688',owner:'Nathan Shepard',pleoReviewer:'pranathi@example.com',expenseId:'e07b3cff-eb22-4df7-bae0-7453fac590da'},
+  ];
+  return exportWorkbook(demo,[['Receipt','receipt'],['Owner','owner'],['Pleo Reviewer','pleoReviewer'],['Expense ID','expenseId']]);
 }
 // Parsed preview held server-side, keyed by a one-time token — confirm only
 // needs the token back, and re-checks each row's current state rather than
@@ -2427,6 +2437,11 @@ async function api(req,res,url){
         return json(res,200,{ok:true,assigned:n,skippedFinal});
       }
       const ids=(Array.isArray(b.transaction_ids)?b.transaction_ids:[b.transaction_id]).map(Number).filter(Boolean);if(!ids.length)return json(res,400,{error:'No transactions selected'});let n=0;const t=iso(),day=today();for(const id of ids){const tx=rowTx(id);if(!tx)continue;if(['APPROVED','REJECTED'].includes(tx.status)&&!b.force)continue;db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status=CASE WHEN status IN ('APPROVED','REJECTED') THEN status ELSE 'ASSIGNED' END,updated_at=? WHERE id=?").run(reviewer.id,u.id,t,day,t,id);audit(id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name});n++;}return json(res,200,{ok:true,assigned:n});
+    }
+    if(req.method==='GET'&&url.pathname==='/api/assign/import/template'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
+      const file=buildAssignmentImportTemplate();
+      res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Template.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
     // Bulk allocation from a Receipt/Owner/Pleo Reviewer/Expense ID spreadsheet
     // (Excel or CSV): preview matches/mismatches first, confirm only acts on
