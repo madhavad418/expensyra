@@ -2088,7 +2088,7 @@ function buildAssignmentImportPreview(rows){
   const assignable=db.prepare("SELECT id,name,email FROM users WHERE active=1 AND role IN ('REVIEWER','TEAM_LEAD')").all();
   const normName=s=>String(s||'').trim().replace(/\s+/g,' ').toLowerCase();
   const normEmail=s=>String(s||'').trim().toLowerCase();
-  const findTx=db.prepare('SELECT id,employee_name,status,reviewer_id FROM transactions WHERE pleo_accounting_entry_id=?');
+  const findTx=db.prepare('SELECT t.id,t.employee_name,t.status,t.reviewer_id,u.name reviewer_name FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id WHERE t.pleo_accounting_entry_id=?');
   const out=rows.map((r,idx)=>{
     const receipt=pick(r,['Receipt']),owner=pick(r,['Owner']),pleoReviewer=pick(r,['Pleo Reviewer']),expenseId=pick(r,['Expense ID','Expense Id']);
     const base={row:idx+2,receipt,owner,pleoReviewer,expenseId};
@@ -2100,8 +2100,11 @@ function buildAssignmentImportPreview(rows){
     const reviewer=assignable.find(u=>normEmail(u.email)===normEmail(pleoReviewer));
     if(!reviewer) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead with the email "${pleoReviewer}"`,txId:tx.id};
     if(['APPROVED','REJECTED'].includes(tx.status)) return {...base,status:'ALREADY_FINAL',reason:'This transaction is already approved/rejected',txId:tx.id};
+    // A daily re-import must never silently move an open transaction off
+    // whoever currently has it — even if the file names someone else — so
+    // any existing reviewer (regardless of who) stops the row here.
+    if(tx.reviewer_id) return {...base,status:'ALREADY_ASSIGNED',reason:tx.reviewer_id===reviewer.id?`Already assigned to ${reviewer.name}`:`Already assigned to ${tx.reviewer_name||'someone else'} — not reassigned`,txId:tx.id,reviewerId:tx.reviewer_id,reviewerName:tx.reviewer_name||reviewer.name};
     const backfillOwner=owner&&ownerUnknown?owner:null;
-    if(tx.reviewer_id===reviewer.id&&!backfillOwner) return {...base,status:'ALREADY_ASSIGNED',reason:`Already assigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
     return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name,backfillOwner,...(backfillOwner?{reason:`Owner was unknown on this transaction — will be set to "${owner}"`}:{})};
   });
   const summary={total:out.length};
@@ -2488,7 +2491,7 @@ async function api(req,res,url){
         for(const r of ready){
           const tx=rowTx(r.txId);
           const reviewer=db.prepare("SELECT id,name,active,role FROM users WHERE id=?").get(r.reviewerId);
-          if(!tx||['APPROVED','REJECTED'].includes(tx.status)||!reviewer||!reviewer.active||!['REVIEWER','TEAM_LEAD'].includes(reviewer.role)){skipped++;continue;}
+          if(!tx||['APPROVED','REJECTED'].includes(tx.status)||tx.reviewer_id||!reviewer||!reviewer.active||!['REVIEWER','TEAM_LEAD'].includes(reviewer.role)){skipped++;continue;}
           // Owner was unknown (deleted from Pleo before JSAN ever synced it) —
           // trust the file's Owner and backfill it, re-checked against the
           // transaction's current state rather than the stale preview.
