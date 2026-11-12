@@ -2271,8 +2271,12 @@ async function api(req,res,url){
       const isDay=v=>/^\d{4}-\d{2}-\d{2}$/.test(v||'');
       const from=isDay(url.searchParams.get('from'))?url.searchParams.get('from'):null,to=isDay(url.searchParams.get('to'))?url.searchParams.get('to'):null;
       const args=[];let where=`WHERE ${TX_SPENDING_SQL}`;
-      const scopeReview=url.searchParams.get('pleo_review')==='NOT_STARTED_APPROX'?'NOT_STARTED_APPROX':null;
-      if(scopeReview){where+=' AND t.pleo_review_status IN (?,?)';args.push('WAITING_FOR_REVIEWER','NOT_SET');}
+      const reviewerParam=url.searchParams.get('reviewer_id');
+      const scopeReviewer=reviewerParam?Number(reviewerParam):null;
+      if(reviewerParam&&(!Number.isSafeInteger(scopeReviewer)||scopeReviewer<=0))return json(res,400,{error:'Select a valid reviewer or team lead.'});
+      const reviewers=db.prepare("SELECT id,name,role,active FROM users WHERE role IN ('REVIEWER','TEAM_LEAD') ORDER BY name,id").all();
+      if(scopeReviewer&&!reviewers.some(r=>r.id===scopeReviewer))return json(res,400,{error:'Reviewer or team lead not found.'});
+      if(scopeReviewer){where+=' AND t.reviewer_id=?';args.push(scopeReviewer);}
       if(from){where+=' AND date(t.transaction_date)>=date(?)';args.push(from);}
       if(to){where+=' AND date(t.transaction_date)<=date(?)';args.push(to);}
       const owner="COALESCE(NULLIF(t.employee_id,''),NULLIF(t.employee_email,''),NULLIF(t.employee_name,''),'UNKNOWN')";
@@ -2317,7 +2321,7 @@ async function api(req,res,url){
       const topMerchants=nums(db.prepare(`SELECT COALESCE(NULLIF(t.merchant,''),'Unknown merchant') merchant,t.bill_currency currency,COUNT(*) count,COALESCE(SUM(-t.bill_amount),0) amount ${from_} ${sWhere} GROUP BY COALESCE(NULLIF(t.merchant,''),'Unknown merchant'),t.bill_currency ORDER BY amount DESC LIMIT 10`).all(...sArgs));
       let owner_=null;
       if(scopeOwner){
-        const who=db.prepare(`SELECT ${ownerCols} ${from_} WHERE ${owner}=?`).get(scopeOwner)||{};
+        const who=db.prepare(`SELECT ${ownerCols} ${from_} ${where} AND ${owner}=?`).get(...args,scopeOwner)||{};
         const ownerArgs=[...args,scopeOwner],ownerWhere=`${where} AND ${owner}=?`;
         owner_={owner_key:scopeOwner,name:who.name||'Unknown owner',email:who.email||null,
           allProjects:totalsFor(ownerWhere,ownerArgs),
@@ -2332,7 +2336,7 @@ async function api(req,res,url){
       const byKey=new Map(projects.map(p=>[key(p),p]));
       for(const r of ownerRows)byKey.get(key(r))?.owners.push({owner_key:r.owner_key,name:r.name,email:r.email,count:Number(r.count),amount:Number(r.amount)});
       if(owner_)for(const p of owner_.projects)p.name=p.code?(names.get(p.code)||p.code):'No project';
-      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts,pleo_review:scopeReview},coverage:{first:coverage.first_day||null,last:coverage.last_day||null},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
+      return json(res,200,{filters:{from,to,project:scopeProject,owner:scopeOwner,category:scopeCategory,receipts:scopeReceipts,reviewer_id:scopeReviewer},reviewers,coverage:{first:coverage.first_day||null,last:coverage.last_day||null},totals,overall,receipts,monthly,daily,topUsers,topCategories,topMerchants,owner:owner_,projects,version:dataVersion()});
     }
     // === REVIEW OPERATIONS ===
     // "Active validation time" (recorded work_sessions/heartbeat data) and

@@ -26,7 +26,7 @@ const root=document.querySelector('#app');const toastEl=document.querySelector('
 // Selected transaction ids. allMatching = "every transaction matching the
 // current filters" (all pages); any clear() — filter change, Esc, Clear — ends it.
 class TxSelection extends Set{constructor(){super();this.allMatching=false}clear(){this.allMatching=false;super.clear()}}
-const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new TxSelection(),filters:{status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
+const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new TxSelection(),filters:{reviewer_id:'',status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{month:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtMoney=(n,c='GBP')=>{try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:c||'GBP'}).format(Number(n||0));}catch{return `${c||''} ${Number(n||0).toFixed(2)}`}};
 const fmtTime=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=Math.floor(s%60);return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`};
@@ -257,9 +257,9 @@ function renderTxTable(rows){
 // Transactions page. The filter + allocation shell renders once; any filter
 // change re-queries and swaps only #tx-results — no "Apply" step, and typing
 // in the search box is never interrupted by a re-render.
-const TX_FILTER_KEYS=['status','pleo_status','q','source','category','project','employee','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','new_since'];
+const TX_FILTER_KEYS=['reviewer_id','status','pleo_status','q','source','category','project','employee','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','new_since'];
 const TX_STATUSES=['UNASSIGNED','ASSIGNED','IN_REVIEW','NEEDS_INFO','APPROVED','REJECTED'];
-const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,employee:'Employee',pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',new_since:'New since'};
+const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,reviewer_id:'Reviewer',employee:'Employee',pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',new_since:'New since'};
 const ICON_SEARCH='<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 const fmtCount=n=>Number(n||0).toLocaleString('en-GB');
 const sentenceCase=v=>String(v).replaceAll('_',' ').toLowerCase().replace(/^./,m=>m.toUpperCase());
@@ -277,6 +277,7 @@ function employeeLabels(){
   return state.employeeLabelCache={list,byId};
 }
 function txFilterValueLabel(k,v){
+  if(k==='reviewer_id')return state.bootstrap.users?.find(u=>String(u.id)===String(v))?.name||v;
   if(k==='project')return state.filterOptions?.projects.find(o=>o.value===v)?.name||v;
   if(k==='employee')return employeeLabels().byId.get(v)||v;
   if(k==='pleo_review')return PLEO_REVIEW_LABELS[v]||v;
@@ -301,6 +302,7 @@ async function renderTransactions(c){
       <label class="tx-search"><span class="tx-search-caption">Search transactions</span><div class="tx-search-control">${ICON_SEARCH}<input id="tx-search" type="search" placeholder="Search merchant, employee or Pleo ID" value="${esc(f.q)}" autocomplete="off" aria-label="Search transactions"></div></label>
       ${fo?`<label class="tx-field"><span>Project</span><select id="tx-project" data-filter>${opt('','All projects',!projectSel)}${opt('__missing',`No project · ${fmtCount(fo.missingProject.count)}`,projectSel==='__missing')}${fo.projects.map(o=>opt(o.value,`${o.name} · ${fmtCount(o.count)}`,projectSel===o.value)).join('')}</select></label>`:''}
       ${fo?.employees?`<label class="tx-field tx-employee"><span>Employee</span><select id="tx-employee" data-filter aria-label="Filter by employee">${opt('','All employees · '+fmtCount(fo.employees.length),!f.employee)}${fo.employees.map(e=>opt(e.value,`${employeeLabels().byId.get(e.value)} · ${fmtCount(e.count)}`,f.employee===e.value)).join('')}</select></label>`:''}
+      ${manage?`<label class="tx-field"><span>Reviewer</span><select id="tx-reviewer" data-filter aria-label="Filter by reviewer">${opt('','All reviewers',!f.reviewer_id)}${reviewers.map(r=>opt(String(r.id),r.name+(r.role==='TEAM_LEAD'?' (Team Lead)':''),String(f.reviewer_id)===String(r.id))).join('')}</select></label>`:''}
       <label class="tx-field"><span>Evidence</span><select id="tx-evidence" data-filter title="Receipt evidence reported by Pleo. Counts follow the other filters.">${opt('','All transactions',!f.receipt_status)}${opt('present','With evidence',f.receipt_status==='present')}${opt('missing','Without evidence',f.receipt_status==='missing')}</select></label>
       <label class="tx-field"><span>JSAN status</span><select id="tx-status" data-filter>${opt('','Any status',!f.status)}${TX_STATUSES.map(s=>opt(s,sentenceCase(s),f.status===s)).join('')}</select></label>
     </div>
@@ -375,6 +377,7 @@ async function renderTransactions(c){
     f.pleo_status=document.querySelector('#tx-pleo-status').value;f.status=document.querySelector('#tx-status').value;f.source=document.querySelector('#tx-source').value;
     f.receipt_status=document.querySelector('#tx-evidence').value;
     const em=document.querySelector('#tx-employee');if(em)f.employee=em.value;
+    const reviewer=document.querySelector('#tx-reviewer');if(reviewer)f.reviewer_id=reviewer.value;
     const pr=document.querySelector('#tx-pleo-review');if(pr)f.pleo_review=pr.value;
     f.dateFrom=document.querySelector('#tx-from').value;f.dateTo=document.querySelector('#tx-to').value;
     refresh();
@@ -905,8 +908,8 @@ function sdCountUp(root){
   for(const el of els)el.textContent=fmt(el,0);requestAnimationFrame(step);
 }
 async function renderSpend(c){
-  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,category:null,receipts:null,pleo_review:'',gran:'auto',sideCollapsed:(()=>{try{return localStorage.getItem('spendops.sdSideCollapsed')==='1'}catch{return false}})(),pq:'',oq:'',allPeople:false});
-  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);if(st.category)qs.set('category',st.category);if(st.receipts)qs.set('receipts',st.receipts);if(st.pleo_review)qs.set('pleo_review',st.pleo_review);
+  const st=state.spend||(state.spend={from:'',to:'',custom:false,project:null,owner:null,category:null,receipts:null,reviewer_id:'',gran:'auto',sideCollapsed:(()=>{try{return localStorage.getItem('spendops.sdSideCollapsed')==='1'}catch{return false}})(),pq:'',oq:'',allPeople:false});
+  const qs=new URLSearchParams();if(st.from)qs.set('from',st.from);if(st.to)qs.set('to',st.to);if(st.project)qs.set('project',st.project);if(st.owner)qs.set('owner',st.owner);if(st.category)qs.set('category',st.category);if(st.receipts)qs.set('receipts',st.receipts);if(st.reviewer_id)qs.set('reviewer_id',st.reviewer_id);
   // The sync status only feeds the header; the dashboard still renders without it.
   const [d,syncInfo]=await Promise.all([api(`/api/analytics/spend-dashboard?${qs}`),api('/api/pleo/daily-sync').catch(()=>null)]);if(state.page!=='spend')return;
   const listScroll=c.querySelector('.sdb-list')?.scrollTop||0;
@@ -993,15 +996,15 @@ async function renderSpend(c){
     <div class="sdb-meta-item"><span class="sdb-meta-icon">${sdSvg('calendar')}</span><div><small>Data covers</small><b>${d.coverage.first?`${fmtDay(d.coverage.first)} – ${fmtDay(d.coverage.last)}`:'No spending yet'}</b></div></div>
     <div class="sdb-meta-item"><span class="sdb-meta-icon ${syncRunning?'running':lastSync?'ok':'warn'}">${sdSvg('sync')}</span><div><small>Last Pleo sync</small><b title="${esc(syncAt?fmtDate(syncAt):'')}">${syncRunning?'Syncing now…':syncAt?esc(ago(syncAt)):'Not synced yet'}</b></div></div>
     <button type="button" class="sdb-meta-btn" data-sd-refresh aria-label="Refresh dashboard" title="Refresh">${sdSvg('sync',18)}</button></div>`;
-  const filtersOn=Boolean(st.project||st.owner||st.category||st.receipts||st.pleo_review||st.from||st.to);
+  const filtersOn=Boolean(st.project||st.owner||st.category||st.receipts||st.reviewer_id||st.from||st.to);
   const csvLabel=isOwner?'largest transactions':isProject?'people':'projects';
   const tools=`<div class="sdb-tools">${filtersOn?`<button type="button" class="sdb-tool" data-sd-reset>${sdSvg('reset',16)}Reset view</button>`:''}<button type="button" class="sdb-tool primary" data-sd-csv title="Download the ${csvLabel} shown as CSV">${sdSvg('download',16)}Download CSV</button></div>`;
   c.innerHTML=pageHead('Spend dashboard','Where the money goes, by project and by person, from transactions synced from Pleo.',headMeta)+`<div class="sdb-toolbar"><div class="sdb-period" role="group" aria-label="Period">${presets.map(([id,l,f])=>`<button type="button" class="${activePreset===id?'on':''}" aria-pressed="${activePreset===id}" data-sd-from="${f}">${l}</button>`).join('')}<button type="button" class="${activePreset==='custom'?'on':''}" aria-pressed="${activePreset==='custom'}" data-sd-custom>Custom</button></div>
-  ${activePreset==='custom'?`<form id="sd-range" class="sdb-range"><label>From<input type="date" name="from" value="${esc(st.from)}"></label><label>To<input type="date" name="to" value="${esc(st.to)}"></label><button class="btn btn-primary">Apply</button></form>`:''}${tools}</div><section class="sdb-review-filter" aria-labelledby="sd-review-title"><div class="sdb-review-heading"><span class="sdb-review-icon" aria-hidden="true">${sdSvg('calendar',20)}</span><div><h3 id="sd-review-title">Pleo review</h3><p>Focus your spending view</p></div><span class="sdb-review-badge">Status only</span></div><div class="sdb-review-switch" role="group" aria-label="Pleo review filter" aria-describedby="sd-review-help"><button type="button" data-sd-review="" class="${!st.pleo_review?'on':''}" aria-pressed="${!st.pleo_review}"><span class="sdb-review-dot"></span>All reviews</button><button type="button" data-sd-review="NOT_STARTED_APPROX" class="${st.pleo_review==='NOT_STARTED_APPROX'?'on':''}" aria-pressed="${st.pleo_review==='NOT_STARTED_APPROX'}"><span class="sdb-review-dot"></span>Awaiting review</button></div><details class="sdb-review-info" ${st.pleo_review?'open':''}><summary>How this filter works</summary><p id="sd-review-help">Includes Awaiting reviewer and Review not set. This does not identify whether review has started: expenses with prior edits or review activity can still be awaiting review. Pleo Activity history is not available through this connection. Missing statuses are excluded. Applies to billed spending only.</p></details></section>
+  ${activePreset==='custom'?`<form id="sd-range" class="sdb-range"><label>From<input type="date" name="from" value="${esc(st.from)}"></label><label>To<input type="date" name="to" value="${esc(st.to)}"></label><button class="btn btn-primary">Apply</button></form>`:''}${tools}</div><section class="sdb-review-filter" aria-labelledby="sd-reviewer-title"><div class="sdb-review-heading"><span class="sdb-review-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M21 20v-2a6 6 0 0 0-3-5.2"/></svg></span><div><h3 id="sd-reviewer-title">Reviewer / Team lead</h3><p>Show owners, projects and spending from their assigned transactions.</p></div></div><label class="tx-field sdb-reviewer-field"><span>Select reviewer or team lead</span><select id="sd-reviewer" aria-label="Filter spending by reviewer or team lead"><option value="">All reviewers and team leads</option>${(d.reviewers||[]).map(r=>`<option value="${r.id}" ${String(st.reviewer_id)===String(r.id)?'selected':''}>${esc(r.name)}${r.role==='TEAM_LEAD'?' (Team Lead)':''}${r.active?'':' (Inactive)'}</option>`).join('')}</select></label></section>
   <div class="sdb-layout${st.sideCollapsed?' side-collapsed':''}"><aside id="sd-side" class="sdb-side sdb-card" aria-label="${project?'People in this project':'Projects'}"><button type="button" class="sdb-side-toggle" data-sd-side aria-controls="sd-side" aria-expanded="${!st.sideCollapsed}" aria-label="${st.sideCollapsed?'Show':'Hide'} ${project?'people':'project'} list" title="${st.sideCollapsed?'Show':'Hide'} list">${sdSvg('panel',18)}</button><span class="sdb-rail-label" aria-hidden="true">${esc(project?project.name:'Projects')}</span>${side}</aside><div class="sdb-main"><nav class="sdb-crumbs" aria-label="Selection">${crumbs.join('<span aria-hidden="true">›</span>')}${catChip}</nav>${head}${main}</div></div>`;
 
   const go=()=>{c.querySelector('.sdb-layout')?.classList.add('sdb-busy');return renderSpend(c).catch(e=>toast(e.message,true))};
-  c.querySelectorAll('[data-sd-review]').forEach(b=>b.addEventListener('click',()=>{if(st.pleo_review===b.dataset.sdReview)return;st.pleo_review=b.dataset.sdReview;go()}));
+  c.querySelector('#sd-reviewer').addEventListener('change',e=>{st.reviewer_id=e.target.value;Object.assign(st,{project:null,owner:null,category:null,receipts:null,pq:'',oq:'',allPeople:false});go()});
   // Chart: re-drawn in place when the granularity changes (no refetch).
   const drawChart=g=>{
     const host=c.querySelector('#sd-chart');if(!host)return;
@@ -1039,7 +1042,7 @@ async function renderSpend(c){
   // Open the same selection in the Transactions tab (its filters use the same names).
   c.querySelector('[data-sd-to-tx]')?.addEventListener('click',()=>{
     const f=state.filters;for(const k of Object.keys(f))f[k]='';
-    f.pleo_review=st.pleo_review||'';
+    f.reviewer_id=st.reviewer_id||'';
     f.receipt_status=st.receipts==='with'?'present':st.receipts==='without'?'missing':'';
     if(project&&project.code)f.project=project.code;if(isOwner)f.employee=st.owner;if(st.category)f.category=st.category;
     if(st.from)f.dateFrom=st.from;if(st.to)f.dateTo=st.to;
@@ -1047,7 +1050,7 @@ async function renderSpend(c){
   });
   sdCountUp(c);
   c.querySelector('[data-sd-refresh]')?.addEventListener('click',()=>{toast('Refreshing…');go()});
-  c.querySelector('[data-sd-reset]')?.addEventListener('click',()=>{Object.assign(st,{from:'',to:'',custom:false,project:null,owner:null,category:null,receipts:null,pleo_review:'',gran:'auto',oq:'',allPeople:false});go()});
+  c.querySelector('[data-sd-reset]')?.addEventListener('click',()=>{Object.assign(st,{from:'',to:'',custom:false,project:null,owner:null,category:null,receipts:null,reviewer_id:'',gran:'auto',oq:'',allPeople:false});go()});
   // Sidebar collapse: toggled in place, remembered per browser.
   c.querySelector('[data-sd-side]')?.addEventListener('click',e=>{st.sideCollapsed=!st.sideCollapsed;try{localStorage.setItem('spendops.sdSideCollapsed',st.sideCollapsed?'1':'0')}catch{}const lay=c.querySelector('.sdb-layout'),b=e.currentTarget,what=project?'people':'project';lay.classList.toggle('side-collapsed',st.sideCollapsed);b.setAttribute('aria-expanded',String(!st.sideCollapsed));b.setAttribute('aria-label',`${st.sideCollapsed?'Show':'Hide'} ${what} list`);b.title=`${st.sideCollapsed?'Show':'Hide'} list`});
   // CSV of the breakdown in view: projects, a project's people, or a person's largest transactions.
@@ -1058,7 +1061,7 @@ async function renderSpend(c){
     if(isOwner){name=`spend-${ownerInfo.name}`;rows=[['Date','Merchant','Category','Project',`Amount (${cur})`],...ownerInfo.largest.map(t=>[String(t.transaction_date||'').slice(0,10),t.merchant||'',t.category,t.code||'No project',amt(t.amount)])];}
     else if(isProject){name=`spend-${project.code||'no-project'}-people`;rows=[['Person','Email','Transactions',`Spend (${cur})`,'Share of project %'],...project.owners.map(o=>[o.name,o.email||'',o.count,amt(o.amount),share(o.amount,project.amount).toFixed(1)])];}
     else{name='spend-projects';rows=[['Project','Code','People','Transactions',`Spend (${cur})`,'Share %'],...projects.map(p=>[p.name,p.code||'',p.owners.length,p.count,amt(p.amount),share(p.amount,all.amount).toFixed(1)])];}
-    const suffix=[st.pleo_review&&'awaiting-review-status-only',st.category,st.receipts&&`receipts-${st.receipts}`,st.from&&`from-${st.from}`,st.to&&`to-${st.to}`].filter(Boolean).join('-');
+    const suffix=[st.reviewer_id&&`reviewer-${st.reviewer_id}`,st.category,st.receipts&&`receipts-${st.receipts}`,st.from&&`from-${st.from}`,st.to&&`to-${st.to}`].filter(Boolean).join('-');
     const blob=new Blob(['\ufeff'+rows.map(r=>r.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
     const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`${(name+(suffix?'-'+suffix:'')).replace(/[^\w.-]+/g,'-').slice(0,120)}.csv`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
     toast(`Downloaded ${rows.length-1} ${csvLabel}`);

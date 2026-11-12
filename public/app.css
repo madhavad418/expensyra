@@ -1353,3 +1353,14 @@ ol.sdb-rank li:nth-child(-n+3) .sdb-pos{background:#e8f1fd;color:var(--jsan-prim
 .sdb-review-info summary{cursor:pointer;width:fit-content;font-weight:600}
 .sdb-review-info p{max-width:780px;margin:8px 0 0;line-height:1.6}
 @media(max-width:640px){.sdb-review-filter{padding:16px;gap:14px}.sdb-review-heading{flex-basis:100%}.sdb-review-switch{width:100%}.sdb-review-switch button{flex:1;padding:0 10px;font-size:12px}.sdb-review-badge{margin-left:auto}}
+
+/* Reviewer scope: match the dashboard controls, including keyboard and mobile use. */
+.sdb-review-filter .sdb-reviewer-field{flex:0 1 380px;gap:8px}
+.sdb-reviewer-field>span{font-size:11px;letter-spacing:.055em;color:#526b8b}
+.sdb-reviewer-field select{appearance:none;-webkit-appearance:none;width:100%;min-width:0;height:50px;padding:0 44px 0 16px;border:1px solid #cbdced;border-radius:12px;background-color:#fff;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='m2 2 5 5 5-5' fill='none' stroke='%230052a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 17px center;color:#163a64;font:inherit;font-size:14px;font-weight:600;box-shadow:0 2px 6px #163a6408;cursor:pointer;text-overflow:ellipsis;transition:border-color .15s,box-shadow .15s,background-color .15s}
+.sdb-reviewer-field select:hover{border-color:#7ca9d8;background-color:#fbfdff}
+.sdb-reviewer-field select:focus-visible{outline:3px solid #b8d8fa;outline-offset:2px;border-color:#0052a3;box-shadow:0 0 0 1px #0052a3}
+.sdb-reviewer-field select:disabled{opacity:.6;cursor:wait}
+.sdb-review-heading .sdb-review-icon{flex-shrink:0;width:46px;height:46px;border-radius:14px}
+@media(max-width:640px){.sdb-review-filter .sdb-reviewer-field{flex-basis:100%;width:100%}.sdb-reviewer-field select{font-size:16px}}
+@media(prefers-reduced-motion:reduce){.sdb-reviewer-field select{transition:none}}

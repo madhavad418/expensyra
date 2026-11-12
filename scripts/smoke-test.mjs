@@ -1,5 +1,6 @@
 import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs';
+import {DatabaseSync} from 'node:sqlite';
 import {readFirstSheet} from '../lib/xlsx.mjs';
 import os from 'node:os';
 import path from 'node:path';
@@ -157,6 +158,21 @@ try{
   if(x.p.total!==0||x.p.rows.length||x.p.evidenceCounts.total||Object.keys(x.p.statusCounts).length) fail('Reviewer filter must not expose another reviewer assignments');
   x=await req('/api/transactions?limit=50',{cookie:reviewerCookie});
   if(x.p.total!==1||x.p.rows[0].id!==txId||x.p.statusCounts.APPROVED!==1) fail('Completed assigned transactions must remain visible');
+  // Give only this isolated fixture billed production fields; mock spending is excluded.
+  const spendDb=new DatabaseSync(path.join(dir,'smoke.db'));
+  spendDb.exec("UPDATE transactions SET source_system='PLEO',source_environment='PRODUCTION',source_kind='API',bill_currency=currency,bill_amount=-amount,pleo_status='COMPLETED',pleo_family='CARD_PURCHASE'");
+  spendDb.close();
+  // Spend dashboard scopes every breakdown to the selected assignee.
+  x=await req(`/api/analytics/spend-dashboard?reviewer_id=${reviewer2Id}`,{cookie:adminCookie});
+  if(x.p.totals.reduce((n,r)=>n+r.count,0)!==17||x.p.projects.reduce((n,r)=>n+r.count,0)!==17) fail('Reviewer spend totals and projects must include only their assignments');
+  if(x.p.projects.some(p=>p.code!==ruleProject.code)||!x.p.reviewers.some(r=>r.id===reviewer2Id)) fail('Reviewer spend projects or dropdown options incorrect');
+  const spendOwner=x.p.projects[0].owners[0].owner_key;
+  x=await req(`/api/analytics/spend-dashboard?reviewer_id=${reviewer2Id}&owner=${encodeURIComponent(spendOwner)}`,{cookie:adminCookie});
+  if(x.p.owner.largest.some(t=>t.id===txId)||x.p.owner.projects.some(p=>p.code!==ruleProject.code)) fail('Owner drill-down must retain reviewer scope');
+  x=await req(`/api/analytics/spend-dashboard?reviewer_id=${reviewerId}`,{cookie:adminCookie});
+  if(x.p.overall.reduce((n,r)=>n+r.count,0)!==1||x.p.projects.length!==1||x.p.projects[0].code!==manualProject.code) fail('Switching reviewer must update all spending');
+  x=await req('/api/analytics/spend-dashboard',{cookie:adminCookie});
+  if(x.p.overall.reduce((n,r)=>n+r.count,0)!==18) fail('Clearing reviewer must restore all spending');
   x=await req('/api/analytics/expense',{cookie:adminCookie});
   const spendHere=(x.p.breakdowns?.spendByProject||[]).find(r=>r.project_code==='HERE-UK');
   if(!spendHere||spendHere.count!==17) fail(`Spend by project should count rule-attributed rows: ${JSON.stringify(x.p.breakdowns?.spendByProject)}`);
