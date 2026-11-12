@@ -2182,18 +2182,23 @@ async function api(req,res,url){
       const latest=db.prepare('SELECT * FROM pleo_sync_runs ORDER BY id DESC LIMIT 1').get()||null; return json(res,200,{counts,validationsToday:validations.c||0,activeSecondsToday:active.secs||0,reviewSecondsToday:validations.review_secs||0,completedToday:completed.c||0,pending:pending.c||0,latestSync:latest});
     }
     if(req.method==='GET'&&url.pathname==='/api/team'){
-      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD','FINANCE_QC']);if(!u)return;const day=today();const rows=db.prepare(`SELECT usr.id,usr.name,usr.email,usr.role,
-        (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.allocation_day=?) assigned_today,
-        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day=?) validations_today,
-        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day=? AND r.decision='APPROVED') approved_today,
-        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day=? AND r.decision='REJECTED') rejected_today,
-        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day=? AND r.decision='NEEDS_INFO') needs_info_today,
-        (SELECT COALESCE(SUM(r.review_seconds),0) FROM reviews r WHERE r.user_id=usr.id AND r.business_day=?) review_seconds_today,
-        (SELECT COALESCE(SUM(CASE WHEN w.ended_at IS NULL THEN MAX(0,CAST((julianday(w.last_heartbeat_at)-julianday(w.started_at))*86400 AS INTEGER)) ELSE COALESCE(w.seconds,0) END),0) FROM work_sessions w WHERE w.user_id=usr.id AND w.business_day=?) active_seconds_today,
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD','FINANCE_QC']);if(!u)return;
+      // month=YYYY-MM or dateFrom/dateTo narrow the window; neither given
+      // defaults to today, same as before this endpoint took a date filter.
+      const {from:rawFrom,to:rawTo}=parseMonthOrRange(url);
+      const from=rawFrom||today(),to=rawTo||today();
+      const rows=db.prepare(`SELECT usr.id,usr.name,usr.email,usr.role,
+        (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.allocation_day BETWEEN ?1 AND ?2) assigned_today,
+        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2) validations_today,
+        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2 AND r.decision='APPROVED') approved_today,
+        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2 AND r.decision='REJECTED') rejected_today,
+        (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2 AND r.decision='NEEDS_INFO') needs_info_today,
+        (SELECT COALESCE(SUM(r.review_seconds),0) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2) review_seconds_today,
+        (SELECT COALESCE(SUM(CASE WHEN w.ended_at IS NULL THEN MAX(0,CAST((julianday(w.last_heartbeat_at)-julianday(w.started_at))*86400 AS INTEGER)) ELSE COALESCE(w.seconds,0) END),0) FROM work_sessions w WHERE w.user_id=usr.id AND w.business_day BETWEEN ?1 AND ?2) active_seconds_today,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO')) pending,
         (SELECT COUNT(*) FROM work_sessions w WHERE w.user_id=usr.id AND w.ended_at IS NULL) active_sessions
-        FROM users usr WHERE usr.active=1 AND usr.role='REVIEWER' ORDER BY usr.name`).all(day,day,day,day,day,day,day);
-      return json(res,200,{day,rows:rows.map(r=>({...r,avg_seconds:r.validations_today?Math.round(r.review_seconds_today/r.validations_today):0}))});
+        FROM users usr WHERE usr.active=1 AND usr.role='REVIEWER' ORDER BY usr.name`).all(from,to);
+      return json(res,200,{day:from===to?from:null,from,to,rows:rows.map(r=>({...r,avg_seconds:r.validations_today?Math.round(r.review_seconds_today/r.validations_today):0}))});
     }
     // === EXPENSE INTELLIGENCE ===
     // All money is grouped by currency, never summed across currencies (no FX
