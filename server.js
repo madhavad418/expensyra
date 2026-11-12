@@ -2407,6 +2407,18 @@ async function api(req,res,url){
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':`attachment; filename="PleoExported_Data_${from}_to_${to}.xlsx"`,'Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
     if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url,user));
+    // Auto-advance: the next pending transaction assigned to the caller,
+    // oldest allocation first — same ordering as "Current queue" in Review
+    // Operations, so this is never a surprise ordering to the reviewer.
+    // ?exclude=<id> leaves out the one just decided — a Needs info decision
+    // keeps a transaction in this same pending set, so without excluding it
+    // the oldest-first order would hand the reviewer right back the thing
+    // they just set aside instead of moving on.
+    if(req.method==='GET'&&url.pathname==='/api/transactions/next'){
+      const exclude=Number(url.searchParams.get('exclude'))||0;
+      const row=db.prepare("SELECT id FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO') AND id<>? ORDER BY allocated_at ASC LIMIT 1").get(user.id,exclude);
+      return json(res,200,{id:row?.id??null});
+    }
     const txMatch=url.pathname.match(/^\/api\/transactions\/(\d+)$/);
     if(req.method==='GET'&&txMatch){const tx=rowTx(Number(txMatch[1]));if(!tx)return json(res,404,{error:'Transaction not found'});if(!transactionAccess(user,tx))return json(res,403,{error:'Not assigned to you'});const sessions=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? ORDER BY id DESC').all(tx.id);const reviews=db.prepare('SELECT r.*,u.name reviewer_name FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.transaction_id=? ORDER BY r.id DESC').all(tx.id);const auditRows=db.prepare('SELECT a.*,u.name actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id WHERE a.transaction_id=? ORDER BY a.id DESC LIMIT 100').all(tx.id).map(a=>({...a,detail:safeJson(a.detail,{})}));const attachments=db.prepare('SELECT id,file_key,receipt_id,mime_type,size_bytes,fetched_at,fetch_error,CASE WHEN cache_path IS NULL THEN 0 ELSE 1 END cached FROM pleo_attachments WHERE transaction_id=? ORDER BY id').all(tx.id);
       // One list for the UI: live Pleo receipts (viewed on demand, nothing
