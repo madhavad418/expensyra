@@ -2063,13 +2063,17 @@ function expenseFilters(url){
 // Pleo Reviewer/Expense ID spreadsheet (Excel or CSV) ===
 // Expense ID is matched against pleo_accounting_entry_id exactly like the
 // Pleo Excel import above; Owner is cross-checked against the transaction's
-// own employee_name as a safety check before any assignment happens, and
-// Pleo Reviewer holds that person's email — resolved to an active
+// own employee_name as a safety check before any assignment happens — unless
+// the transaction's owner is unknown (deleted from Pleo before JSAN ever
+// synced it, so employee_name was never captured), in which case the file's
+// Owner is trusted and backfilled onto the transaction instead of blocking
+// the row. Pleo Reviewer holds that person's email — resolved to an active
 // Reviewer/Team Lead by exact email match (emails are unique, so this can
 // never be ambiguous the way a name could be). Receipt isn't matched against
 // anything JSAN stores — it's carried through purely for the uploader to
 // cross-reference their own source file.
 const ASSIGN_IMPORT_REQUIRED=['Receipt','Owner','Pleo Reviewer','Expense ID'];
+const ASSIGN_IMPORT_STATUS_LABELS={READY:'Will assign',ALREADY_ASSIGNED:'Already assigned',ALREADY_FINAL:'Already final',OWNER_MISMATCH:'Owner mismatch',REVIEWER_NOT_FOUND:'Reviewer not found',NOT_FOUND:'Expense ID not found'};
 const hasCol=(row,name)=>Object.keys(row).some(k=>norm(k)===norm(name));
 function rowsFromUpload(buffer,filename){
   if(/\.(csv|txt)$/i.test(filename||'')) return parseCsv(buffer.toString('utf8'));
@@ -2091,12 +2095,14 @@ function buildAssignmentImportPreview(rows){
     if(!expenseId) return {...base,status:'NOT_FOUND',reason:'No Expense ID in this row'};
     const tx=findTx.get(expenseId);
     if(!tx) return {...base,status:'NOT_FOUND',reason:'No transaction with this Expense ID',txId:null};
-    if(owner&&normName(owner)!==normName(tx.employee_name)) return {...base,status:'OWNER_MISMATCH',reason:`File says "${owner}", transaction's owner is "${tx.employee_name||'—'}"`,txId:tx.id};
+    const ownerUnknown=!tx.employee_name;
+    if(owner&&!ownerUnknown&&normName(owner)!==normName(tx.employee_name)) return {...base,status:'OWNER_MISMATCH',reason:`File says "${owner}", transaction's owner is "${tx.employee_name}"`,txId:tx.id};
     const reviewer=assignable.find(u=>normEmail(u.email)===normEmail(pleoReviewer));
     if(!reviewer) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead with the email "${pleoReviewer}"`,txId:tx.id};
     if(['APPROVED','REJECTED'].includes(tx.status)) return {...base,status:'ALREADY_FINAL',reason:'This transaction is already approved/rejected',txId:tx.id};
-    if(tx.reviewer_id===reviewer.id) return {...base,status:'ALREADY_ASSIGNED',reason:`Already assigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
-    return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
+    const backfillOwner=owner&&ownerUnknown?owner:null;
+    if(tx.reviewer_id===reviewer.id&&!backfillOwner) return {...base,status:'ALREADY_ASSIGNED',reason:`Already assigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name};
+    return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name,backfillOwner,...(backfillOwner?{reason:`Owner was unknown on this transaction — will be set to "${owner}"`}:{})};
   });
   const summary={total:out.length};
   for(const s of ['READY','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
@@ -2443,6 +2449,18 @@ async function api(req,res,url){
       const file=buildAssignmentImportTemplate();
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Template.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
+    // The rows a preview couldn't act on (bad Expense ID, owner mismatch,
+    // unknown reviewer email, already final) as a downloadable sheet, so the
+    // uploader can fix their source file instead of re-reading the on-screen table.
+    if(req.method==='GET'&&url.pathname==='/api/assign/import/issues'){
+      const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
+      const entry=assignImportPreviews.get(url.searchParams.get('token')||'');
+      if(!entry)return json(res,400,{error:'This preview has expired. Upload the file again.'});
+      const issues=entry.rows.filter(r=>!['READY','ALREADY_ASSIGNED'].includes(r.status))
+        .map(r=>({row:r.row,receipt:r.receipt,owner:r.owner,expenseId:r.expenseId,pleoReviewer:r.pleoReviewer,status:ASSIGN_IMPORT_STATUS_LABELS[r.status]||r.status,reason:r.reason||''}));
+      const file=exportWorkbook(issues,[['Row','row'],['Receipt','receipt'],['Owner','owner'],['Expense ID','expenseId'],['Pleo Reviewer','pleoReviewer'],['Status','status'],['Reason','reason']]);
+      res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Issues.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
+    }
     // Bulk allocation from a Receipt/Owner/Pleo Reviewer/Expense ID spreadsheet
     // (Excel or CSV): preview matches/mismatches first, confirm only acts on
     // rows still valid at that moment (see buildAssignmentImportPreview()).
@@ -2471,8 +2489,13 @@ async function api(req,res,url){
           const tx=rowTx(r.txId);
           const reviewer=db.prepare("SELECT id,name,active,role FROM users WHERE id=?").get(r.reviewerId);
           if(!tx||['APPROVED','REJECTED'].includes(tx.status)||!reviewer||!reviewer.active||!['REVIEWER','TEAM_LEAD'].includes(reviewer.role)){skipped++;continue;}
+          // Owner was unknown (deleted from Pleo before JSAN ever synced it) —
+          // trust the file's Owner and backfill it, re-checked against the
+          // transaction's current state rather than the stale preview.
+          const backfilled=r.backfillOwner&&!tx.employee_name;
+          if(backfilled){db.prepare('UPDATE transactions SET employee_name=?,updated_at=? WHERE id=?').run(clampText(r.backfillOwner,200),t,r.txId);recalculateTransactionQuality(r.txId);}
           upd.run(reviewer.id,u.id,t,day,t,r.txId);
-          audit(r.txId,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId});
+          audit(r.txId,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId,...(backfilled?{owner_backfilled:r.backfillOwner}:{})});
           assigned++;
         }
         db.exec('COMMIT');

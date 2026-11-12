@@ -476,10 +476,10 @@ function openAssignImportModal(c){
   document.body.insertAdjacentHTML('beforeend',`<div id="assign-import-modal" class="modal-wrap"><div class="modal" style="max-width:920px">
     <div class="modal-head"><div><div class="kicker">Allocate work</div><h3>Import assignments</h3></div><button id="ai-close" class="close">×</button></div>
     <div class="modal-body">
-      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned, and <b>Pleo Reviewer</b> holds that person's <b>email</b> — matched to an active reviewer or team lead, and shown by name once matched.</p>
+      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned (unless that employee is unknown to JSAN — in that case the file's Owner is trusted and saved onto the transaction instead of blocking it), and <b>Pleo Reviewer</b> holds that person's <b>email</b> — matched to an active reviewer or team lead, and shown by name once matched.</p>
       <div class="adm-actions"><button type="button" id="ai-template" class="btn btn-soft">⬇ Download template (.xlsx)</button></div>
       <label class="adm-drop" for="ai-file"><input id="ai-file" type="file" accept=".xlsx,.csv"><span class="adm-drop-icon" aria-hidden="true">⬆</span><b id="ai-file-name">Choose a file (.xlsx or .csv)</b><small>Preview first — nothing is assigned until you confirm.</small></label>
-      <div class="adm-actions"><button type="button" id="ai-preview" class="btn btn-soft">Preview</button><button type="button" id="ai-confirm" class="btn btn-primary" disabled>Confirm assignment</button></div>
+      <div class="adm-actions"><button type="button" id="ai-preview" class="btn btn-soft">Preview</button><button type="button" id="ai-confirm" class="btn btn-primary" disabled>Confirm assignment</button><button type="button" id="ai-issues" class="btn btn-ghost-dark" hidden>⬇ Download issues (.xlsx)</button></div>
       <div id="ai-result" aria-live="polite"></div>
     </div>
   </div></div>`);
@@ -496,25 +496,37 @@ function openAssignImportModal(c){
       toast('Template downloaded');
     }catch(x){toast(x.message,true)}finally{e.currentTarget.disabled=false}
   });
-  const result=modal.querySelector('#ai-result'),confirmBtn=modal.querySelector('#ai-confirm'),fileInput=modal.querySelector('#ai-file');
+  const result=modal.querySelector('#ai-result'),confirmBtn=modal.querySelector('#ai-confirm'),fileInput=modal.querySelector('#ai-file'),issuesBtn=modal.querySelector('#ai-issues');
   let token=null;
   fileInput.addEventListener('change',e=>{
-    confirmBtn.disabled=true;token=null;result.innerHTML='';
+    confirmBtn.disabled=true;issuesBtn.hidden=true;token=null;result.innerHTML='';
     const f=e.currentTarget.files[0];modal.querySelector('#ai-file-name').textContent=f?f.name:'Choose a file (.xlsx or .csv)';
     e.currentTarget.closest('.adm-drop').classList.toggle('has-file',Boolean(f));
   });
   modal.querySelector('#ai-preview').onclick=async()=>{
     const file=fileInput.files[0];if(!file)return toast('Choose a file first',true);
-    token=null;confirmBtn.disabled=true;result.innerHTML=`<div class="muted small">Checking ${esc(file.name)}…</div>`;
+    token=null;confirmBtn.disabled=true;issuesBtn.hidden=true;result.innerHTML=`<div class="muted small">Checking ${esc(file.name)}…</div>`;
     try{
       const r=await api('/api/assign/import/preview',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':file.name},body:file});
       token=r.token;const s=r.summary;
       const chip=(key)=>{const n=s[key]||0;if(!n)return'';const st=ASSIGN_IMPORT_STATUS[key];return `<span class="adm-pill ${st.tone}">${fmtCount(n)} ${st.label.toLowerCase()}</span>`};
       result.innerHTML=`<div class="assign-import-chips">${Object.keys(ASSIGN_IMPORT_STATUS).map(chip).join('')}</div>
-        <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer (email)</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
+        <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer (email)</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
       confirmBtn.disabled=!s.READY;
+      const issueCount=(s.OWNER_MISMATCH||0)+(s.REVIEWER_NOT_FOUND||0)+(s.NOT_FOUND||0)+(s.ALREADY_FINAL||0);
+      issuesBtn.hidden=!issueCount;issuesBtn.textContent=`⬇ Download ${fmtCount(issueCount)} issue(s) (.xlsx)`;
     }catch(x){result.innerHTML=`<div class="error-box">${esc(x.message)}</div>`}
   };
+  issuesBtn.addEventListener('click',async()=>{
+    if(!token)return;
+    issuesBtn.disabled=true;
+    try{
+      const r=await fetch(`/api/assign/import/issues?token=${encodeURIComponent(token)}`);if(!r.ok)throw Error((await r.json()).error||'Download failed');
+      const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+      a.href=url;a.download='Expensyra_Assignment_Import_Issues.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+      toast('Issues downloaded');
+    }catch(x){toast(x.message,true)}finally{issuesBtn.disabled=false}
+  });
   confirmBtn.onclick=async()=>{
     if(!token)return;
     confirmBtn.disabled=true;const original=confirmBtn.textContent;confirmBtn.textContent='Assigning…';
