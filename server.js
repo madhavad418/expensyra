@@ -2449,17 +2449,17 @@ async function api(req,res,url){
       const file=buildAssignmentImportTemplate();
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Template.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
-    // The rows a preview couldn't act on (bad Expense ID, owner mismatch,
-    // unknown reviewer email, already final) as a downloadable sheet, so the
-    // uploader can fix their source file instead of re-reading the on-screen table.
-    if(req.method==='GET'&&url.pathname==='/api/assign/import/issues'){
+    // Every row from a preview — ready, already assigned/final, and blocked
+    // (bad Expense ID, owner mismatch, unknown reviewer email) — as one
+    // downloadable sheet, so the uploader has the full picture offline
+    // instead of scrolling the on-screen table.
+    if(req.method==='GET'&&url.pathname==='/api/assign/import/results'){
       const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
       const entry=assignImportPreviews.get(url.searchParams.get('token')||'');
       if(!entry)return json(res,400,{error:'This preview has expired. Upload the file again.'});
-      const issues=entry.rows.filter(r=>!['READY','ALREADY_ASSIGNED'].includes(r.status))
-        .map(r=>({row:r.row,receipt:r.receipt,owner:r.owner,expenseId:r.expenseId,pleoReviewer:r.pleoReviewer,status:ASSIGN_IMPORT_STATUS_LABELS[r.status]||r.status,reason:r.reason||''}));
-      const file=exportWorkbook(issues,[['Row','row'],['Receipt','receipt'],['Owner','owner'],['Expense ID','expenseId'],['Pleo Reviewer','pleoReviewer'],['Status','status'],['Reason','reason']]);
-      res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Issues.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
+      const rows=entry.rows.map(r=>({row:r.row,receipt:r.receipt,owner:r.owner,expenseId:r.expenseId,pleoReviewer:r.pleoReviewer,status:ASSIGN_IMPORT_STATUS_LABELS[r.status]||r.status,assignedTo:r.reviewerName||'',reason:r.reason||''}));
+      const file=exportWorkbook(rows,[['Row','row'],['Receipt','receipt'],['Owner','owner'],['Expense ID','expenseId'],['Pleo Reviewer','pleoReviewer'],['Status','status'],['Assigned to','assignedTo'],['Reason','reason']]);
+      res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="Expensyra_Assignment_Import_Results.xlsx"','Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
     // Bulk allocation from a Receipt/Owner/Pleo Reviewer/Expense ID spreadsheet
     // (Excel or CSV): preview matches/mismatches first, confirm only acts on
