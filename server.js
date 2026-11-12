@@ -70,6 +70,13 @@ const cfg = {
   // "Sync now" takes any range; it is fetched from Pleo in windows of this
   // many days, one after another, within the same run.
   pleoSyncWindowDays: 31,
+  // The automatic daily sync always re-pulls this many trailing days, not
+  // just "since last success" — a correction Pleo-side on an
+  // already-settled entry (e.g. the employee fills in details after being
+  // asked for more info) never changes its settledAt, so only a repeated
+  // refresh of recent history picks it up. JSAN's own review state
+  // (status/reviewer/decision) is never touched by a sync either way.
+  pleoDailyRefreshDays: Math.max(1, Number(process.env.PLEO_DAILY_REFRESH_DAYS || 30)),
   allowRecoveryImport: envBool('ALLOW_RECOVERY_IMPORT', true),
 };
 // Reviewer-chosen commercial classification. The legacy values stay valid in
@@ -1757,9 +1764,15 @@ async function syncPleo(runId, triggerType='manual', userId=null, opts={}) {
       const lastMs=Date.parse(last||''),fromMs=Date.parse(opts.from||'');
       // Window: an explicit "Sync now" range if one was chosen; otherwise
       // everything settled since the last successful sync (1h overlap for
-      // late-arriving rows); first run ever: the last 24 hours only. Older
-      // corrections are refreshed with a deliberate historical backfill.
-      const startMs=Number.isFinite(fromMs)?fromMs:Number.isFinite(lastMs)?lastMs-60*60_000:endDate.getTime()-cfg.pleoInitialLookbackHours*3600_000;
+      // late-arriving rows); first run ever: the last 24 hours only. The
+      // automatic daily sync additionally never starts later than
+      // pleoDailyRefreshDays back, so it keeps re-refreshing recent history
+      // every day rather than only the delta since yesterday — the only way
+      // to catch a Pleo-side correction on an entry that already settled.
+      // Older corrections still need a deliberate historical backfill.
+      const checkpointStartMs=Number.isFinite(lastMs)?lastMs-60*60_000:endDate.getTime()-cfg.pleoInitialLookbackHours*3600_000;
+      const dailyRefreshStartMs=endDate.getTime()-cfg.pleoDailyRefreshDays*86400_000;
+      const startMs=Number.isFinite(fromMs)?fromMs:triggerType==='daily'?Math.min(checkpointStartMs,dailyRefreshStartMs):checkpointStartMs;
       const startDate=new Date(startMs);
       const body={includeDeleted:false,settledAtStart:startDate.toISOString(),settledAtEnd:endDate.toISOString()};
       db.prepare('UPDATE pleo_sync_runs SET requested_from=?,requested_to=? WHERE id=?').run(body.settledAtStart,body.settledAtEnd,runId);
