@@ -1958,8 +1958,8 @@ function availableCategoryNames(){
     WHERE name IS NOT NULL AND TRIM(name)<>''
     GROUP BY TRIM(name) COLLATE NOCASE ORDER BY name COLLATE NOCASE`).all().map(r=>r.name);
 }
-function transactionList(url){
-  const {whereSql,args}=transactionWhere(url.searchParams);
+function transactionList(url,user){
+  const {whereSql,args}=transactionWhere(url.searchParams,user);
   const limit=Math.min(500,Math.max(1,Number(url.searchParams.get('limit')||200)));
   const offset=Math.max(0,Number(url.searchParams.get('offset')||0));
   const sortKey=TX_SORTS[url.searchParams.get('sort')]?url.searchParams.get('sort'):'date';
@@ -1975,14 +1975,15 @@ function transactionList(url){
       COALESCE(SUM(t.commercial_classification IS NULL),0) unclassified
     FROM transactions t ${whereSql}`).get(...args);
   const total=main.total,gaps={noProject:main.noProject,unclassified:main.unclassified},unbilled=main.unbilled;
-  const pendingTotal=db.prepare("SELECT count(*) n FROM transactions WHERE pleo_status='PENDING'").get().n;
+  const pendingWhere=transactionWhere(new URLSearchParams({pleo_status:'PENDING'}),user);
+  const pendingTotal=db.prepare(`SELECT count(*) n FROM transactions t ${pendingWhere.whereSql}`).get(...pendingWhere.args).n;
   const evidenceParams=new URLSearchParams(url.searchParams);evidenceParams.delete('receipt_status');
-  const evidenceWhere=transactionWhere(evidenceParams);
+  const evidenceWhere=transactionWhere(evidenceParams,user);
   const evidenceCounts=db.prepare(`SELECT COUNT(*) total,COALESCE(SUM(t.receipt_count>0),0) present,COALESCE(SUM(t.receipt_count=0),0) missing FROM transactions t ${evidenceWhere.whereSql}`).get(...evidenceWhere.args);
   // Status tab counts ignore the status filter itself, so every tab shows
   // what it would contain with the other filters kept.
   const statusParams=new URLSearchParams(url.searchParams);statusParams.delete('status');
-  const statusWhere=transactionWhere(statusParams);
+  const statusWhere=transactionWhere(statusParams,user);
   const statusCounts=Object.fromEntries(db.prepare(`SELECT t.status,COUNT(*) n FROM transactions t ${statusWhere.whereSql} GROUP BY t.status`).all(...statusWhere.args).map(r=>[r.status,r.n]));
   // Billed spending of the matching set, by the same rules as Expense
   // Intelligence (lib/expense-summary.mjs): Pleo billed amount, sign flipped so
@@ -2011,11 +2012,12 @@ const TX_SORTS={
 };
 // Shared by the transaction list and filter-based bulk allocation, so
 // "Assign all matching" always acts on exactly the set the list showed.
-function transactionWhere(params){
-  // Every role sees every transaction here — "visible to everyone" applies
-  // to the list/detail views; who may act on one (start/review) is still
-  // gated separately by reviewer_id/role at the action endpoints.
-  const wh=[],args=[]; const status=params.get('status');if(status){wh.push('t.status=?');args.push(status);} const reviewer=params.get('reviewer_id');if(reviewer){wh.push('t.reviewer_id=?');args.push(Number(reviewer));}
+function transactionWhere(params,user){
+  // Reviewer visibility is enforced from the authenticated user, independently
+  // of client filters, for lists, counts and exports.
+  const wh=[],args=[];
+  if(user.role==='REVIEWER'){wh.push('t.reviewer_id=?');args.push(user.id);}
+  const status=params.get('status');if(status){wh.push('t.status=?');args.push(status);} const reviewer=params.get('reviewer_id');if(reviewer){wh.push('t.reviewer_id=?');args.push(Number(reviewer));}
   const q=params.get('q');if(q){wh.push('(t.merchant LIKE ? OR t.employee_name LIKE ? OR t.pleo_accounting_entry_id LIKE ? OR t.pleo_reconciliation_id LIKE ?)');const s=`%${q.slice(0,100)}%`;args.push(s,s,s,s);} const project=params.get('project');if(project){wh.push(`${EFFECTIVE_PROJECT_SQL}=?`);args.push(project);}
   // One person, by Pleo employee id (names aren't unique).
   const employee=params.get('employee');if(employee){wh.push('t.employee_id=?');args.push(employee);}
@@ -2385,7 +2387,7 @@ async function api(req,res,url){
       const valid=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&Number.isFinite(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v;
       if(!valid(from)||!valid(to)||from>to)return json(res,400,{error:'Select valid From and To dates in order.'});
       const params=new URLSearchParams({dateFrom:from,dateTo:to});
-      const {whereSql,args}=transactionWhere(params);
+      const {whereSql,args}=transactionWhere(params,user);
       const rows=db.prepare(`SELECT t.*,u.name reviewer_name,${EFFECTIVE_PROJECT_SQL} effective_project_code FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql} ORDER BY t.transaction_date,t.id`).all(...args);
       const projects=new Map(db.prepare('SELECT code,name FROM projects').all().map(p=>[p.code,p.name]));
       for(const row of rows)row.effective_project_name=projects.get(row.effective_project_code)||row.team_name||'';
@@ -2395,7 +2397,7 @@ async function api(req,res,url){
       const file=exportWorkbook(rows,columns);
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':`attachment; filename="PleoExported_Data_${from}_to_${to}.xlsx"`,'Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
-    if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url));
+    if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url,user));
     const txMatch=url.pathname.match(/^\/api\/transactions\/(\d+)$/);
     if(req.method==='GET'&&txMatch){const tx=rowTx(Number(txMatch[1]));if(!tx)return json(res,404,{error:'Transaction not found'});if(!transactionAccess(user,tx))return json(res,403,{error:'Not assigned to you'});const sessions=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? ORDER BY id DESC').all(tx.id);const reviews=db.prepare('SELECT r.*,u.name reviewer_name FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.transaction_id=? ORDER BY r.id DESC').all(tx.id);const auditRows=db.prepare('SELECT a.*,u.name actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id WHERE a.transaction_id=? ORDER BY a.id DESC LIMIT 100').all(tx.id).map(a=>({...a,detail:safeJson(a.detail,{})}));const attachments=db.prepare('SELECT id,file_key,receipt_id,mime_type,size_bytes,fetched_at,fetch_error,CASE WHEN cache_path IS NULL THEN 0 ELSE 1 END cached FROM pleo_attachments WHERE transaction_id=? ORDER BY id').all(tx.id);
       // One list for the UI: live Pleo receipts (viewed on demand, nothing
@@ -2449,7 +2451,7 @@ async function api(req,res,url){
       // set since, refuse rather than assign something they didn't see.
       if(b.filter&&typeof b.filter==='object'){
         const params=new URLSearchParams();for(const [k,v] of Object.entries(b.filter))if(v!=null&&v!=='')params.set(k,String(v));
-        const {whereSql,args}=transactionWhere(params);
+        const {whereSql,args}=transactionWhere(params,user);
         const matched=db.prepare(`SELECT t.id,t.status FROM transactions t ${whereSql}`).all(...args);
         if(b.expected_count!=null&&Number(b.expected_count)!==matched.length)return json(res,409,{error:`The matching set changed (now ${matched.length} transactions) — refresh the list and try again`,matched:matched.length});
         const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
@@ -2528,7 +2530,7 @@ async function api(req,res,url){
       const run=rows=>{let n=0,skippedFinal=0,skippedUnassigned=0;db.exec('BEGIN');try{for(const r of rows){if(['APPROVED','REJECTED'].includes(r.status)){skippedFinal++;continue;}if(!r.reviewer_id){skippedUnassigned++;continue;}clear.run(t,r.id);audit(r.id,u.id,'UNALLOCATED',{previous_reviewer_id:r.reviewer_id,previous_reviewer_name:r.reviewer_name||null});n++;}db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}return{n,skippedFinal,skippedUnassigned};};
       if(b.filter&&typeof b.filter==='object'){
         const params=new URLSearchParams();for(const [k,v] of Object.entries(b.filter))if(v!=null&&v!=='')params.set(k,String(v));
-        const {whereSql,args}=transactionWhere(params);
+        const {whereSql,args}=transactionWhere(params,user);
         const matched=db.prepare(`SELECT t.id,t.status,t.reviewer_id,u.name reviewer_name FROM transactions t LEFT JOIN users u ON u.id=t.reviewer_id ${whereSql}`).all(...args);
         if(b.expected_count!=null&&Number(b.expected_count)!==matched.length)return json(res,409,{error:`The matching set changed (now ${matched.length} transactions) — refresh the list and try again`,matched:matched.length});
         const {n,skippedFinal,skippedUnassigned}=run(matched);

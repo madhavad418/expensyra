@@ -1,5 +1,6 @@
 import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs';
+import {readFirstSheet} from '../lib/xlsx.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,11 +102,23 @@ try{
   if(!x.p.user.must_change_password) fail('Temporary-password enforcement flag missing');
   await req('/api/auth/change-password',{method:'POST',cookie:reviewerCookie,body:{current_password:'TempPassword!2026',new_password:'ReviewerNew!2026'}});
 
+  const exportResponse=await fetch(base+'/api/transactions/export?dateFrom=2000-01-01&dateTo=2100-12-31',{headers:{Cookie:reviewerCookie}});
+  if(!exportResponse.ok) fail('Reviewer export failed');
+  const exported=readFirstSheet(Buffer.from(await exportResponse.arrayBuffer())).rows;
+  if(exported.length!==2) fail(`Reviewer export must contain one assigned transaction, got ${exported.length-1}`);
   x=await req('/api/transactions?limit=50',{cookie:reviewerCookie});
-  if(x.p.rows.length!==18) fail(`Reviewer should see all 18 transactions, got ${x.p.rows.length}`);
+  if(x.p.total!==1||x.p.rows.length!==1||x.p.rows[0].id!==txId) fail('Reviewer must only see their assigned transaction');
+  if(x.p.evidenceCounts.total!==1||Object.values(x.p.statusCounts).reduce((n,v)=>n+v,0)!==1) fail('Reviewer counts must only include assigned transactions');
+  x=await req('/api/transactions?status=UNASSIGNED&receipt_status=missing',{cookie:reviewerCookie});
+  if(x.p.total!==0||x.p.rows.length) fail('Reviewer must not see unassigned transactions');
+  x=await req('/api/transactions?offset=1&limit=1',{cookie:reviewerCookie});
+  if(x.p.total!==1||x.p.rows.length) fail('Reviewer pagination must use the assigned scope');
   x=await req(`/api/transactions/${txId}/start`,{method:'POST',cookie:reviewerCookie});
   await new Promise(r=>setTimeout(r,1200));
   await req(`/api/transactions/${txId}/heartbeat`,{method:'POST',cookie:reviewerCookie});
+  // Validate the project before the transaction is finalized.
+  let bad=await fetch(base+`/api/transactions/${txId}/review`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:adminCookie},body:JSON.stringify({decision:'NEEDS_INFO',project_code:'NO-SUCH-PROJECT',notes:'x'})});
+  if(bad.status!==400) fail(`Unknown project code should be rejected, got ${bad.status}`);
   x=await req(`/api/transactions/${txId}/review`,{method:'POST',cookie:reviewerCookie,body:{decision:'APPROVED',commercial_classification:'CUSTOMER_BILLABLE',project_code:manualProject.code,notes:'Smoke test validation',manual_category_name:'Smoke category override'}});
   if(x.p.decision!=='APPROVED') fail('Review did not complete');
 
@@ -122,8 +135,7 @@ try{
   await checkManual('after re-sync');
   x=await req(`/api/admin/project-mapping-rules/${ruleId}/approve`,{method:'POST',cookie:adminCookie});
   await checkManual('after rule re-apply');
-  let bad=await fetch(base+`/api/transactions/${txId}/review`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:adminCookie},body:JSON.stringify({decision:'NEEDS_INFO',project_code:'NO-SUCH-PROJECT',notes:'x'})});
-  if(bad.status!==400) fail(`Unknown project code should be rejected, got ${bad.status}`);
+
 
   // Allocation at scale: filter by project, then "assign all matching".
   x=await req('/api/transactions/filter-options',{cookie:adminCookie});
@@ -141,6 +153,10 @@ try{
   if(x.p.assigned!==17) fail(`Bulk filter allocation should assign 17, got ${JSON.stringify(x.p)}`);
   x=await req(`/api/transactions?reviewer_id=${reviewer2Id}&limit=50`,{cookie:adminCookie});
   if(x.p.total!==17||x.p.rows.some(r=>r.id===txId)) fail('Bulk allocation touched the wrong transactions');
+  x=await req(`/api/transactions?reviewer_id=${reviewer2Id}`,{cookie:reviewerCookie});
+  if(x.p.total!==0||x.p.rows.length||x.p.evidenceCounts.total||Object.keys(x.p.statusCounts).length) fail('Reviewer filter must not expose another reviewer assignments');
+  x=await req('/api/transactions?limit=50',{cookie:reviewerCookie});
+  if(x.p.total!==1||x.p.rows[0].id!==txId||x.p.statusCounts.APPROVED!==1) fail('Completed assigned transactions must remain visible');
   x=await req('/api/analytics/expense',{cookie:adminCookie});
   const spendHere=(x.p.breakdowns?.spendByProject||[]).find(r=>r.project_code==='HERE-UK');
   if(!spendHere||spendHere.count!==17) fail(`Spend by project should count rule-attributed rows: ${JSON.stringify(x.p.breakdowns?.spendByProject)}`);
