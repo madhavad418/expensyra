@@ -2407,18 +2407,54 @@ async function api(req,res,url){
       res.writeHead(200,{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':`attachment; filename="PleoExported_Data_${from}_to_${to}.xlsx"`,'Content-Length':file.length,'Cache-Control':'no-store'});return res.end(file);
     }
     if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url,user));
-    // Auto-advance: the next pending transaction assigned to the caller,
-    // oldest allocation first — same ordering as "Current queue" in Review
-    // Operations, so this is never a surprise ordering to the reviewer.
-    // NEEDS_INFO is deliberately left out: those are waiting on the employee,
-    // and auto-opening one would start its timer and silently flip it back to
-    // IN_REVIEW. The reviewer reopens them by hand once the info arrives.
-    // ?exclude=<id> still leaves out the one just decided, as a safeguard.
+    // Auto-advance: the next transaction assigned to the caller that is ready
+    // to verify.
+    // - Fresh work (ASSIGNED / IN_REVIEW) comes first, oldest allocation first.
+    // - A NEEDS_INFO transaction comes back only from the business day AFTER
+    //   it was marked Need info, giving the employee a day to respond. Today's
+    //   Need info decisions are never handed straight back (auto-opening starts
+    //   the timer, which would silently flip them to IN_REVIEW).
+    // - The caller's Transactions filters (same params as /api/transactions,
+    //   e.g. employee=<driver>) narrow the pick, so a reviewer working one
+    //   driver keeps getting that driver. Its status filter is ignored: the
+    //   readiness rule above decides status.
+    // When nothing is left, the response says why (Need info waiting for
+    // tomorrow) and, if a filter was the reason, which other drivers still
+    // have work, so the client can offer to switch.
+    // ?exclude=<id> leaves out the one just decided, as a safeguard.
     // id breaks ties — bulk allocation stamps many rows with one allocated_at.
     if(req.method==='GET'&&url.pathname==='/api/transactions/next'){
       const exclude=Number(url.searchParams.get('exclude'))||0;
-      const row=db.prepare("SELECT id FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW') AND id<>? ORDER BY allocated_at ASC, id ASC LIMIT 1").get(user.id,exclude);
-      return json(res,200,{id:row?.id??null});
+      const day=today();
+      const lastNeedInfoDay="(SELECT r.business_day FROM reviews r WHERE r.transaction_id=t.id AND r.decision='NEEDS_INFO' ORDER BY r.id DESC LIMIT 1)";
+      const READY=`(t.status IN ('ASSIGNED','IN_REVIEW') OR (t.status='NEEDS_INFO' AND COALESCE(${lastNeedInfoDay},'')<?))`;
+      // Reviewers only ever get their own transactions (transactionWhere
+      // enforces it). Admin / team lead / QC can verify anyone's: with a filter
+      // set (driver, reviewer, month…) the next one comes from exactly that
+      // filtered list, whoever it is assigned to; with no filter, from their
+      // own assigned queue, as before.
+      const IGNORED=['status','exclude','limit','offset','sort','dir',...(user.role==='REVIEWER'?['reviewer_id']:[])];
+      const filtered=[...url.searchParams].some(([k,v])=>v&&!IGNORED.includes(k));
+      const scoped=(params,ownQueue)=>{
+        const p=new URLSearchParams(params);for(const k of IGNORED)p.delete(k);
+        const w=transactionWhere(p,user);const wh=w.whereSql?[w.whereSql.slice(6)]:[];const args=[...w.args];
+        if(ownQueue&&user.role!=='REVIEWER'){wh.push('t.reviewer_id=?');args.push(user.id);}
+        return {where:wh.length?wh.join(' AND ')+' AND ':'',args};
+      };
+      const s=scoped(url.searchParams,!filtered);
+      const row=db.prepare(`SELECT t.id,t.status,${lastNeedInfoDay} need_info_day FROM transactions t WHERE ${s.where}${READY} AND t.id<>? ORDER BY CASE WHEN t.status='NEEDS_INFO' THEN 1 ELSE 0 END, t.allocated_at ASC, t.id ASC LIMIT 1`).get(...s.args,day,exclude);
+      if(row)return json(res,200,{id:row.id,returningFromNeedInfo:row.status==='NEEDS_INFO'?{markedDay:row.need_info_day}:null});
+      const waitingNeedInfo=db.prepare(`SELECT COUNT(*) n FROM transactions t WHERE ${s.where}t.status='NEEDS_INFO' AND COALESCE(${lastNeedInfoDay},'')>=?`).get(...s.args,day).n;
+      let otherDrivers=[];
+      if(filtered){
+        // Every driver with work, across reviewers for admin roles — the
+        // popup switches to "this driver only", which is scoped the same way.
+        const all=scoped(new URLSearchParams(),false);
+        otherDrivers=db.prepare(`SELECT t.employee_id,COALESCE(MAX(t.employee_name),t.employee_id,'Unknown employee') employee_name,COUNT(*) n FROM transactions t WHERE ${all.where}${READY} AND t.id<>? GROUP BY t.employee_id ORDER BY employee_name`).all(...all.args,day,exclude);
+      }
+      const employee=url.searchParams.get('employee');
+      const driverName=employee?db.prepare('SELECT MAX(employee_name) n FROM transactions WHERE employee_id=?').get(employee)?.n||null:null;
+      return json(res,200,{id:null,filtered,waitingNeedInfo,otherDrivers,driverName});
     }
     const txMatch=url.pathname.match(/^\/api\/transactions\/(\d+)$/);
     if(req.method==='GET'&&txMatch){const tx=rowTx(Number(txMatch[1]));if(!tx)return json(res,404,{error:'Transaction not found'});if(!transactionAccess(user,tx))return json(res,403,{error:'Not assigned to you'});const sessions=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? ORDER BY id DESC').all(tx.id);const reviews=db.prepare('SELECT r.*,u.name reviewer_name FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.transaction_id=? ORDER BY r.id DESC').all(tx.id);const auditRows=db.prepare('SELECT a.*,u.name actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_id WHERE a.transaction_id=? ORDER BY a.id DESC LIMIT 100').all(tx.id).map(a=>({...a,detail:safeJson(a.detail,{})}));const attachments=db.prepare('SELECT id,file_key,receipt_id,mime_type,size_bytes,fetched_at,fetch_error,CASE WHEN cache_path IS NULL THEN 0 ELSE 1 END cached FROM pleo_attachments WHERE transaction_id=? ORDER BY id').all(tx.id);
@@ -2429,7 +2465,7 @@ async function api(req,res,url){
       const receipts=rids.length
         ?rids.map((rid,i)=>({label:`Receipt ${i+1}`,url:`/api/transactions/${tx.id}/receipts/${encodeURIComponent(rid)}`,cached:attachments.some(a=>a.receipt_id===rid&&a.cached)}))
         :attachments.map((a,i)=>({label:`Receipt ${i+1}`,url:`/api/transactions/${tx.id}/attachments/${a.id}`,cached:Boolean(a.cached),error:a.fetch_error||null}));
-      return json(res,200,{tx,sessions,reviews,audit:auditRows,attachments,receipts,categoryOptions:availableCategoryNames()});}
+      return json(res,200,{tx,sessions,reviews,audit:auditRows,attachments,receipts,categoryOptions:availableCategoryNames(),businessToday:today()});}
     // On-demand receipt viewer: serves a cached copy if one exists, otherwise
     // asks Pleo for a fresh signed link and streams the file straight through
     // — nothing is written to disk and the Pleo key never reaches the browser.

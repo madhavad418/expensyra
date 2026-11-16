@@ -783,12 +783,62 @@ async function openTransaction(id){const p=await api(`/api/transactions/${id}`);
   // Auto-advance: jump straight to the reviewer's next pending transaction and
   // start its timer immediately, rather than dropping back to the list after
   // every single decision. Falls back to the list once the queue is empty.
-  const next=await api(`/api/transactions/next?exclude=${tx.id}`).catch(()=>({id:null}));
-  if(next.id){await openTransaction(next.id);document.querySelector('#start-work')?.click()}
-  else{toast('Queue empty — no more pending transactions assigned to you');await renderPage()}
+  await advanceAfterDecision(tx.id);
 }catch(e){toast(e.message,true)}})}
+// Auto-advance after a decision. Sends the Transactions filters the reviewer
+// is working with (e.g. one driver), so the next transaction stays inside
+// them; the server decides readiness (fresh work first, Need info only from
+// the day after it was marked). When the filter runs dry, a popup offers the
+// other drivers that still have work instead of silently jumping to them.
+function txNextQuery(exclude,filters=state.filters){
+  const q=new URLSearchParams();for(const k of TX_FILTER_KEYS)if(filters[k]&&k!=='status')q.set(k,filters[k]);
+  if(exclude)q.set('exclude',exclude);return q;
+}
+async function advanceAfterDecision(exclude){
+  const next=await api('/api/transactions/next?'+txNextQuery(exclude)).catch(()=>({id:null}));
+  if(next.id){
+    // A Need info item coming back explains itself in the transaction (see
+    // renderNeedInfoJustification) — a toast here would only be overwritten
+    // by "Validation started".
+    await openTransaction(next.id);document.querySelector('#start-work')?.click();
+    return;
+  }
+  const waiting=next.waitingNeedInfo?` ${next.waitingNeedInfo} Need info transaction${next.waitingNeedInfo===1?'':'s'} will come back for re-check tomorrow.`:'';
+  if(next.filtered){await renderPage();return showFilterDonePopup(next,waiting);}
+  toast('Queue empty — no more pending transactions assigned to you.'+waiting);await renderPage();
+}
+// Explains, inside the transaction, why a Need info item is (or isn't yet)
+// back in the reviewer's queue: who marked it, when, the reason given, and
+// the next-business-day rule that decides when it returns.
+function renderNeedInfoJustification(tx){
+  if(tx.status!=='NEEDS_INFO')return;
+  const r=(state.modal.reviews||[]).find(x=>x.decision==='NEEDS_INFO');if(!r)return;
+  const back=r.business_day&&state.modal.businessToday&&r.business_day<state.modal.businessToday;
+  const who=r.reviewer_name?` by ${esc(r.reviewer_name)}`:'';
+  const reason=r.notes?`<div style="margin-top:6px"><b>Reason:</b> ${esc(r.notes)}</div>`:'';
+  const why=back?'Need info transactions come back for re-check the business day after they are marked, so the employee has time to send what was asked for.':'It will come back for re-check automatically tomorrow, so the employee has time to respond.';
+  document.querySelector('#tx-modal .meta-grid')?.insertAdjacentHTML('beforebegin',`<div class="notice need-info-why" role="note" style="margin-bottom:14px"><b>${back?'Back for re-check':'Waiting on the employee'}</b> · Marked Need info on ${esc(fmtDay(r.business_day))}${who}.${reason}<div class="small muted" style="margin-top:6px">${why}</div></div>`);
+}
+const fmtDay=d=>{try{return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric'}).format(new Date(d+'T12:00:00'))}catch{return d}};
+function showFilterDonePopup(next,waiting){
+  document.querySelector('#filter-done')?.remove();
+  const scope=next.driverName?`for ${esc(next.driverName)}`:'for the current filter';
+  const others=(next.otherDrivers||[]).filter(d=>String(d.employee_id)!==String(state.filters.employee));
+  document.body.insertAdjacentHTML('beforeend',`<div id="filter-done" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="filter-done-title"><div class="modal" style="max-width:520px"><div class="modal-head"><div><div class="kicker">Filter complete</div><h3 id="filter-done-title">All transactions ${scope} are verified</h3></div><button class="close" data-fd="close" aria-label="Close">×</button></div><div class="modal-body">
+    <p>${others.length?'Pick another driver to keep going, or choose a different filter.':'No other driver has transactions ready for you right now.'}${esc(waiting)}</p>
+    ${others.length?`<div class="field"><label for="filter-done-driver">Another driver</label><select id="filter-done-driver">${others.map(d=>`<option value="${esc(d.employee_id??'')}">${esc(d.employee_name)} · ${d.n} to verify</option>`).join('')}</select></div>`:''}
+    <div class="decision-row" style="margin-top:14px">${others.length?'<button class="btn btn-primary" data-fd="driver">Continue with this driver</button>':''}<button class="btn btn-soft" data-fd="filters">Choose another filter</button>${others.length?'<button class="btn btn-ghost" data-fd="clear">Clear filters &amp; continue</button>':''}</div>
+  </div></div></div>`);
+  const pop=document.querySelector('#filter-done'),close=()=>pop.remove();
+  pop.querySelector('[data-fd="close"]').onclick=close;
+  pop.querySelector('[data-fd="filters"]').onclick=()=>{close();const nav=document.querySelector('[data-nav="transactions"]');if(nav&&state.page!=='transactions')nav.click();setTimeout(()=>document.querySelector('#tx-search')?.focus(),300)};
+  const restart=async filters=>{close();for(const k of TX_FILTER_KEYS)state.filters[k]='';Object.assign(state.filters,filters);state.txPage=1;await renderPage();await advanceAfterDecision(0)};
+  pop.querySelector('[data-fd="driver"]')?.addEventListener('click',()=>restart({employee:pop.querySelector('#filter-done-driver').value}));
+  pop.querySelector('[data-fd="clear"]')?.addEventListener('click',()=>restart({}));
+  (pop.querySelector('[data-fd="driver"]')||pop.querySelector('[data-fd="filters"]')).focus();
+}
 const renderTransactionExtraFields=openTransaction;
-openTransaction=async function(id){await renderTransactionExtraFields(id);const tx=state.modal?.tx;if(!tx)return;const notesField=document.querySelector('#review-notes')?.closest('.field');if(!notesField)return;const final=['APPROVED','REJECTED'].includes(tx.status);if(!tx.manual_category_name&&!tx.resolved_category_name&&!tx.category)notesField.insertAdjacentHTML('beforebegin',`<div class="field"><label for="manual-category">Category</label><select id="manual-category" ${final?'disabled':''}><option value="">Select a category</option>${(state.modal.categoryOptions||[]).map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('')}</select></div>`);
+openTransaction=async function(id){await renderTransactionExtraFields(id);const tx=state.modal?.tx;if(!tx)return;renderNeedInfoJustification(tx);const notesField=document.querySelector('#review-notes')?.closest('.field');if(!notesField)return;const final=['APPROVED','REJECTED'].includes(tx.status);if(!tx.manual_category_name&&!tx.resolved_category_name&&!tx.category)notesField.insertAdjacentHTML('beforebegin',`<div class="field"><label for="manual-category">Category</label><select id="manual-category" ${final?'disabled':''}><option value="">Select a category</option>${(state.modal.categoryOptions||[]).map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('')}</select></div>`);
   // The transaction's real, unique Pleo ID — same value as the "Expense ID"
   // column in the Excel view, shown here too so it's visible without leaving the modal.
   document.querySelector('.meta-grid')?.insertAdjacentHTML('beforeend',`<div class="meta"><span>Expense ID</span><b>${esc(tx.pleo_accounting_entry_id||'—')}</b></div>`);
@@ -869,6 +919,16 @@ function updateValidationLock(){
   if(start)start.disabled=final||!locked||!(tx.reviewer_id===state.user.id||canSeeTeam());
   if(pause)pause.disabled=locked;
   const badge=document.querySelector('#tx-modal .timer-row .status');if(badge){badge.textContent=locked?'PAUSED':'RUNNING';badge.className='status '+(locked?'s-UNASSIGNED':'s-IN_REVIEW');}
+  // Keep the header's status chip in step with the server while this modal is
+  // open — it was rendered with the status at open time, so otherwise it
+  // shows ASSIGNED next to a RUNNING timer (most visibly after auto-advance,
+  // which renders the next transaction and then starts it). Start moves the
+  // transaction to IN_REVIEW; pause (manual or idle) moves IN_REVIEW back to
+  // ASSIGNED, but only revert a start made from this modal, so a transaction
+  // that is genuinely IN_REVIEW elsewhere isn't relabelled just by viewing it.
+  const setChip=s=>{tx.status=s;const chip=document.querySelector('#tx-modal .meta .status');if(chip){chip.textContent=s.replaceAll('_',' ');chip.className='status s-'+s;}};
+  if(!locked&&tx.status!=='IN_REVIEW'){tx._startedHere=true;setChip('IN_REVIEW');}
+  else if(locked&&tx._startedHere&&tx.status==='IN_REVIEW'){tx._startedHere=false;setChip('ASSIGNED');}
 }
 function startLocalTimer(txId,startedAt){stopLocalTimer();state.activeTx=txId;updateValidationLock();state.sessionStarted=Date.parse(startedAt)||Date.now();const el=()=>document.querySelector('#timer');const tick=()=>{const x=el();if(x)x.textContent=clock(Math.floor((Date.now()-state.sessionStarted)/1000))};tick();state.timer=setInterval(tick,1000);state.heartbeat=setInterval(()=>post(`/api/transactions/${txId}/heartbeat`).catch(()=>{stopLocalTimer();toast('Validation paused. Click Start validation to continue.',true)}),30000)}
 function clock(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`}
