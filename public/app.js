@@ -26,7 +26,7 @@ const root=document.querySelector('#app');const toastEl=document.querySelector('
 // Selected transaction ids. allMatching = "every transaction matching the
 // current filters" (all pages); any clear() — filter change, Esc, Clear — ends it.
 class TxSelection extends Set{constructor(){super();this.allMatching=false}clear(){this.allMatching=false;super.clear()}}
-const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new TxSelection(),filters:{reviewer_id:'',status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{range:'all',month:'',dateFrom:'',dateTo:''},teamFilters:{range:'today',month:'',dateFrom:'',dateTo:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
+const state={user:null,bootstrap:null,page:(()=>{try{return sessionStorage.getItem('spendops.currentPage')||'dashboard'}catch{return 'dashboard'}})(),selected:new TxSelection(),filters:{reviewer_id:'',status:'',pleo_status:'',q:'',category:'',project:'',employee:'',currency:'',commercial_classification:'',merchant:'',receipt_status:'',month:'',source:'',project_status:'',classification_status:'',category_status:'',pleo_review:'',dateFrom:'',dateTo:'',assignedDateFrom:'',assignedDateTo:'',new_since:''},filterOptions:null,txView:(()=>{try{return localStorage.getItem('spendops.txView')||'excel'}catch{return'excel'}})(),txPage:1,txPageSize:50,txSort:'date',txDir:'desc',txDense:(()=>{try{return localStorage.getItem('spendops.txDense')==='1'}catch{return false}})(),expenseFilters:{month:'',project:'',commercial_classification:'',status:'',receipt_status:'',project_status:''},revopsFilters:{range:'all',month:'',dateFrom:'',dateTo:''},teamFilters:{range:'today',month:'',dateFrom:'',dateTo:''},revopsView:'list',revopsReviewerId:null,modal:null,timer:null,heartbeat:null,sessionStarted:null,activeTx:null};
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtMoney=(n,c='GBP')=>{try{return new Intl.NumberFormat('en-GB',{style:'currency',currency:c||'GBP'}).format(Number(n||0));}catch{return `${c||''} ${Number(n||0).toFixed(2)}`}};
 const fmtTime=s=>{s=Math.max(0,Number(s||0));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=Math.floor(s%60);return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(x).padStart(2,'0')}s`};
@@ -265,9 +265,9 @@ function renderTxTable(rows){
 // Transactions page. The filter + allocation shell renders once; any filter
 // change re-queries and swaps only #tx-results — no "Apply" step, and typing
 // in the search box is never interrupted by a re-render.
-const TX_FILTER_KEYS=['reviewer_id','status','pleo_status','q','source','category','project','employee','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','new_since'];
+const TX_FILTER_KEYS=['reviewer_id','status','pleo_status','q','source','category','project','employee','currency','commercial_classification','merchant','receipt_status','month','project_status','classification_status','category_status','pleo_review','dateFrom','dateTo','assignedDateFrom','assignedDateTo','new_since'];
 const TX_STATUSES=['UNASSIGNED','ASSIGNED','IN_REVIEW','NEEDS_INFO','APPROVED','REJECTED'];
-const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,reviewer_id:'Reviewer',employee:'Employee',pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',new_since:'New since'};
+const TX_FILTER_NAMES={...DRILL_FILTER_LABELS,reviewer_id:'Reviewer',employee:'Employee',pleo_status:'Pleo transaction status',status:'Status',q:'Search',project_status:'Project',dateFrom:'From',dateTo:'To',assignedDateFrom:'Assigned from',assignedDateTo:'Assigned to',new_since:'New since'};
 const ICON_SEARCH='<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 const fmtCount=n=>Number(n||0).toLocaleString('en-GB');
 const sentenceCase=v=>String(v).replaceAll('_',' ').toLowerCase().replace(/^./,m=>m.toUpperCase());
@@ -291,7 +291,7 @@ function txFilterValueLabel(k,v){
   if(k==='pleo_review')return PLEO_REVIEW_LABELS[v]||v;
   if(k==='project_status')return v==='MISSING_PROJECT'?'No project':sentenceCase(v);
   if(k==='status')return sentenceCase(v);
-  if(k==='dateFrom'||k==='dateTo'||k==='new_since')return fmtDate(v);
+  if(k==='dateFrom'||k==='dateTo'||k==='assignedDateFrom'||k==='assignedDateTo'||k==='new_since')return fmtDate(v);
   if(k==='source')return SOURCE_LABELS[v]||v;
   return v;
 }
@@ -305,7 +305,7 @@ async function renderTransactions(c){
   c.innerHTML=pageHead('Transaction allocation & validation',state.user.role==='REVIEWER'?'Only transactions assigned to you are shown. Allocation and JSAN validation remain separate from the raw Pleo record.':'Pleo expenses are synced into a controlled queue. Allocation and JSAN validation remain separate from the raw Pleo record.',`<div class="tx-pop-anchor"><button id="tx-open-export" type="button" class="btn btn-primary" aria-haspopup="dialog" aria-expanded="false" aria-controls="tx-export-pop">Export Excel</button><div id="tx-export-pop" class="tx-popover" role="dialog" aria-label="Export Excel" hidden><div class="tx-pop-head"><b>Export to Excel</b><span>All columns, ${state.user.role==='REVIEWER'?'your assigned transactions':'all rows'} in these dates — table filters are ignored.</span></div><div class="tx-pop-presets" role="group" aria-label="Quick ranges"><button type="button" data-export-preset="this">This month</button><button type="button" data-export-preset="last">Last month</button><button type="button" data-export-preset="30">Last 30 days</button></div><div class="tx-pop-dates"><label><span>From</span><input type="date" id="export-from" value="${esc(f.dateFrom)}"></label><label><span>To</span><input type="date" id="export-to" value="${esc(f.dateTo)}"></label></div><button type="button" id="tx-export-excel" class="btn btn-primary tx-pop-go">Download .xlsx</button></div></div>`+(canSeeTeam()?'<div class="tx-pop-anchor"><button id="tx-open-removal" type="button" class="btn btn-soft" aria-haspopup="dialog" aria-expanded="false" aria-controls="tx-removal-pop">Remove imported data</button><div id="tx-removal-pop" class="tx-popover tx-removal" role="dialog" aria-label="Remove imported data" hidden></div></div>':''))+`
   ${canSeeTeam()?'<section id="tx-sync" class="tx-sync" aria-label="Daily Pleo sync"></section>':''}
   <section class="tx-filters" aria-label="Filter transactions">
-    <div class="tx-filter-heading"><div><h3>Find transactions</h3><span>Search your records or narrow the selection.</span></div><button type="button" id="tx-more-toggle" class="tx-more-toggle" aria-controls="tx-more-fields" aria-expanded="${Boolean(f.pleo_status||f.pleo_review||f.dateFrom||f.dateTo||f.source)}">More filters <span aria-hidden="true">+</span></button></div>
+    <div class="tx-filter-heading"><div><h3>Find transactions</h3><span>Search your records or narrow the selection.</span></div><button type="button" id="tx-more-toggle" class="tx-more-toggle" aria-controls="tx-more-fields" aria-expanded="${Boolean(f.pleo_status||f.pleo_review||f.dateFrom||f.dateTo||f.assignedDateFrom||f.assignedDateTo||f.source)}">More filters <span aria-hidden="true">+</span></button></div>
     <div class="tx-filter-grid">
       <label class="tx-search"><span class="tx-search-caption">Search transactions</span><div class="tx-search-control">${ICON_SEARCH}<input id="tx-search" type="search" placeholder="Search merchant, employee or Pleo ID" value="${esc(f.q)}" autocomplete="off" aria-label="Search transactions"></div></label>
       ${fo?`<label class="tx-field"><span>Project</span><select id="tx-project" data-filter>${opt('','All projects',!projectSel)}${opt('__missing',`No project · ${fmtCount(fo.missingProject.count)}`,projectSel==='__missing')}${fo.projects.map(o=>opt(o.value,`${o.name} · ${fmtCount(o.count)}`,projectSel===o.value)).join('')}</select></label>`:''}
@@ -314,12 +314,13 @@ async function renderTransactions(c){
       <label class="tx-field"><span>Evidence</span><select id="tx-evidence" data-filter title="Receipt evidence reported by Pleo. Counts follow the other filters.">${opt('','All transactions',!f.receipt_status)}${opt('present','With evidence',f.receipt_status==='present')}${opt('missing','Without evidence',f.receipt_status==='missing')}</select></label>
       <label class="tx-field"><span>JSAN status</span><select id="tx-status" data-filter>${opt('','Any status',!f.status)}${TX_STATUSES.map(s=>opt(s,sentenceCase(s),f.status===s)).join('')}</select></label>
     </div>
-    <div id="tx-more-fields" class="tx-more-fields" ${f.pleo_status||f.pleo_review||f.dateFrom||f.dateTo||f.source?'':'hidden'}>
+    <div id="tx-more-fields" class="tx-more-fields" ${f.pleo_status||f.pleo_review||f.dateFrom||f.dateTo||f.assignedDateFrom||f.assignedDateTo||f.source?'':'hidden'}>
       <label class="tx-field"><span>Pleo status</span><select id="tx-pleo-status" data-filter>${opt('','All entries',!f.pleo_status)}${['PENDING','COMPLETED','DRAFT','CANCELLED','DECLINED','DELETED'].map(v=>opt(v,sentenceCase(v),f.pleo_status===v)).join('')}</select></label>
       ${fo?`<label class="tx-field"><span>Pleo review</span><select id="tx-pleo-review" data-filter>${opt('','Any Pleo review',!f.pleo_review)}${opt('NOT_STARTED_APPROX','Awaiting review (status only)',f.pleo_review==='NOT_STARTED_APPROX')}${fo.pleoReview.map(o=>opt(o.value,`${PLEO_REVIEW_LABELS[o.value]||o.value} · ${fmtCount(o.count)}`,f.pleo_review===o.value)).join('')}</select></label>`:''}
       <div class="tx-field tx-dates"><span>Date range</span><div class="tx-date-range"><input id="tx-from" type="date" data-filter value="${esc(f.dateFrom)}" aria-label="From date"><span aria-hidden="true">→</span><input id="tx-to" type="date" data-filter value="${esc(f.dateTo)}" aria-label="To date"></div></div>
+      <div class="tx-field tx-dates"><span>Assigned date range</span><div class="tx-date-range"><input id="tx-assigned-from" type="date" data-filter value="${esc(f.assignedDateFrom)}" aria-label="Assigned from date"><span aria-hidden="true">→</span><input id="tx-assigned-to" type="date" data-filter value="${esc(f.assignedDateTo)}" aria-label="Assigned to date"></div></div>
       <label class="tx-field"><span>Source</span><select id="tx-source" data-filter>${opt('','All sources',!f.source)}${Object.entries(SOURCE_LABELS).map(([v,l])=>opt(v,l,f.source===v)).join('')}</select></label>
-      <p class="tx-date-note">Dates use settlement date, or purchase date for pending entries.</p><p class="tx-date-note">Awaiting review (status only) includes Awaiting reviewer and Review not set. This does not mean review has not started: prior edits and review activity are not exposed by this connection. Missing review status is excluded.</p>
+      <p class="tx-date-note">Date range uses settlement date, or purchase date for pending entries. Assigned date range uses the recorded business day the transaction was allocated to its current reviewer.</p><p class="tx-date-note">Awaiting review (status only) includes Awaiting reviewer and Review not set. This does not mean review has not started: prior edits and review activity are not exposed by this connection. Missing review status is excluded.</p>
     </div>
     <div class="tx-filter-foot"><div id="tx-chips" class="tx-chips"></div><button type="button" id="tx-show-pending" class="btn btn-soft">Pending Pleo entries</button><div id="tx-count" class="tx-count" aria-live="polite"></div></div>
   </section>
@@ -388,6 +389,7 @@ async function renderTransactions(c){
     const reviewer=document.querySelector('#tx-reviewer');if(reviewer)f.reviewer_id=reviewer.value;
     const pr=document.querySelector('#tx-pleo-review');if(pr)f.pleo_review=pr.value;
     f.dateFrom=document.querySelector('#tx-from').value;f.dateTo=document.querySelector('#tx-to').value;
+    f.assignedDateFrom=document.querySelector('#tx-assigned-from').value;f.assignedDateTo=document.querySelector('#tx-assigned-to').value;
     refresh();
   }));
   const search=document.querySelector('#tx-search');let debounce;
@@ -478,7 +480,7 @@ function renderRemovalPopover(c,pop,close){
 // re-checks each row server-side rather than trusting the preview is still
 // fresh (another admin may have acted on one of these rows meanwhile).
 const ASSIGN_IMPORT_STATUS={
-  READY:{label:'Will assign',tone:'ok'}, ALREADY_ASSIGNED:{label:'Already assigned',tone:'neutral'},
+  READY:{label:'Will assign',tone:'ok'}, REASSIGN:{label:'Will reassign (Need info)',tone:'ok'}, ALREADY_ASSIGNED:{label:'Already assigned',tone:'neutral'},
   ALREADY_FINAL:{label:'Already final',tone:'neutral'}, OWNER_MISMATCH:{label:'Owner mismatch',tone:'bad'},
   REVIEWER_NOT_FOUND:{label:'Reviewer not found',tone:'bad'},
   NOT_FOUND:{label:'Expense ID not found',tone:'bad'},
@@ -523,7 +525,7 @@ function openAssignImportModal(c){
       const chip=(key)=>{const n=s[key]||0;if(!n)return'';const st=ASSIGN_IMPORT_STATUS[key];return `<span class="adm-pill ${st.tone}">${fmtCount(n)} ${st.label.toLowerCase()}</span>`};
       result.innerHTML=`<div class="assign-import-chips">${Object.keys(ASSIGN_IMPORT_STATUS).map(chip).join('')}</div>
         <div class="table-wrap assign-import-table"><table class="table"><thead><tr><th>Row</th><th>Receipt</th><th>Owner</th><th>Pleo Reviewer (email)</th><th>Expense ID</th><th>Result</th></tr></thead><tbody>${r.rows.map(row=>{const st=ASSIGN_IMPORT_STATUS[row.status];return `<tr><td>${row.row}</td><td>${esc(row.receipt||'—')}</td><td>${esc(row.owner||'—')}</td><td>${esc(row.pleoReviewer||'—')}</td><td class="small muted">${esc(row.expenseId||'—')}</td><td><span class="adm-pill ${st.tone}">${st.label}</span>${row.status==='READY'?`<div class="small muted">→ ${esc(row.reviewerName)}</div>`:''}${row.reason?`<div class="small muted">${esc(row.reason)}</div>`:''}</td></tr>`}).join('')}</tbody></table></div>`;
-      confirmBtn.disabled=!s.READY;
+      confirmBtn.disabled=!(s.READY||s.REASSIGN);
       issuesBtn.hidden=false;issuesBtn.textContent=`⬇ Download all ${fmtCount(s.total)} row(s) (.xlsx)`;
     }catch(x){result.innerHTML=`<div class="error-box">${esc(x.message)}</div>`}
   };
@@ -542,7 +544,7 @@ function openAssignImportModal(c){
     confirmBtn.disabled=true;const original=confirmBtn.textContent;confirmBtn.textContent='Assigning…';
     try{
       const r=await post('/api/assign/import/confirm',{token});
-      toast(`${fmtCount(r.assigned)} transaction(s) assigned${r.skipped?` · ${fmtCount(r.skipped)} skipped (changed since preview)`:''}`);
+      toast(`${fmtCount(r.assigned)} transaction(s) assigned${r.reassigned?` · ${fmtCount(r.reassigned)} Need info reassigned`:''}${r.skipped?` · ${fmtCount(r.skipped)} skipped (changed since preview)`:''}`);
       close();state.filterOptions=null;await renderTransactions(c);
     }catch(x){result.insertAdjacentHTML('beforeend',`<div class="error-box">${esc(x.message)}</div>`);confirmBtn.disabled=false;confirmBtn.textContent=original}
   };
@@ -807,21 +809,32 @@ async function advanceAfterDecision(exclude){
     await openTransaction(next.id);document.querySelector('#start-work')?.click();
     return;
   }
-  const waiting=next.waitingNeedInfo?` ${next.waitingNeedInfo} Need info transaction${next.waitingNeedInfo===1?'':'s'} will come back for re-check tomorrow.`:'';
+  const waiting=next.waitingNeedInfo?` ${next.waitingNeedInfo} Need info transaction${next.waitingNeedInfo===1?' is':'s are'} waiting on the employee and will be reassigned when listed in a later assignment import.`:'';
   if(next.filtered){await renderPage();return showFilterDonePopup(next,waiting);}
   toast('Queue empty — no more pending transactions assigned to you.'+waiting);await renderPage();
 }
-// Explains, inside the transaction, why a Need info item is (or isn't yet)
-// back in the reviewer's queue: who marked it, when, the reason given, and
-// the next-business-day rule that decides when it returns.
+// Explains, inside the transaction, where a Need info item stands: still
+// waiting on the employee, or reassigned for verification because a later
+// assignment import listed it (who marked it, when, the reason, by which file).
 function renderNeedInfoJustification(tx){
-  if(tx.status!=='NEEDS_INFO')return;
   const r=(state.modal.reviews||[]).find(x=>x.decision==='NEEDS_INFO');if(!r)return;
-  const back=r.business_day&&state.modal.businessToday&&r.business_day<state.modal.businessToday;
+  const audit=state.modal.audit||[];
+  const detail=a=>{try{return typeof a.detail==='string'?JSON.parse(a.detail):(a.detail||{})}catch{return {}}};
   const who=r.reviewer_name?` by ${esc(r.reviewer_name)}`:'';
   const reason=r.notes?`<div style="margin-top:6px"><b>Reason:</b> ${esc(r.notes)}</div>`:'';
-  const why=back?'Need info transactions come back for re-check the business day after they are marked, so the employee has time to send what was asked for.':'It will come back for re-check automatically tomorrow, so the employee has time to respond.';
-  document.querySelector('#tx-modal .meta-grid')?.insertAdjacentHTML('beforebegin',`<div class="notice need-info-why" role="note" style="margin-bottom:14px"><b>${back?'Back for re-check':'Waiting on the employee'}</b> · Marked Need info on ${esc(fmtDay(r.business_day))}${who}.${reason}<div class="small muted" style="margin-top:6px">${why}</div></div>`);
+  let title,why;
+  if(tx.status==='NEEDS_INFO'){
+    title='Waiting on the employee';
+    why='When this transaction is listed in a later assignment import (Excel/CSV), it is reassigned for verification.';
+  }else{
+    // Latest audit first: only explain a reassignment made after this Need info.
+    const back=audit.find(a=>a.action==='REASSIGNED_FROM_NEED_INFO');
+    if(['APPROVED','REJECTED'].includes(tx.status)||!back||back.created_at<r.created_at)return;
+    const d=detail(back);
+    title='Reassigned from Need info';
+    why=`Listed again in the assignment import${d.source_file?` “${esc(d.source_file)}”`:''} on ${esc(fmtDate(back.created_at))} and reassigned to ${esc(d.reviewer_name||'a reviewer')} for verification.`;
+  }
+  document.querySelector('#tx-modal .meta-grid')?.insertAdjacentHTML('beforebegin',`<div class="notice need-info-why" role="note" style="margin-bottom:14px"><b>${title}</b> · Marked Need info on ${esc(fmtDay(r.business_day))}${who}.${reason}<div class="small muted" style="margin-top:6px">${why}</div></div>`);
 }
 const fmtDay=d=>{try{return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric'}).format(new Date(d+'T12:00:00'))}catch{return d}};
 function showFilterDonePopup(next,waiting){
@@ -1316,7 +1329,7 @@ async function renderRevops(c){
   const d=await api('/api/analytics/reviewers?'+new URLSearchParams(dateRangeParams(state.revopsFilters)));
   c.innerHTML=pageHead('Review Operations','Reviewer workload, decision mix and validation effort. Active validation time (recorded work sessions) is always shown separately from elapsed turnaround time (allocation-to-completion timestamps).')+
   `<div class="panel"><div class="panel-body">${dateRangeBar(state.revopsFilters,'rev',true)}</div></div>
-  <div class="panel"><div class="panel-head"><h3>${d.rows.length} reviewer${d.rows.length===1?'':'s'}</h3></div><div class="table-wrap"><table class="table"><thead><tr><th>Reviewer</th><th class="right">Assigned</th><th class="right">Completed</th><th class="right">Pending</th><th class="right">Approved</th><th class="right">Rejected</th><th class="right">Need info</th><th class="right">Amount reviewed</th><th class="right" title="Source: recorded Expensyra validation sessions">Active time</th><th class="right" title="Source: assignment/completion timestamps — not recorded session time">Elapsed TAT</th><th class="right">Oldest pending</th></tr></thead><tbody>${d.rows.length?d.rows.map(r=>`<tr class="clickable" data-reviewer="${r.id}"><td><b>${esc(r.name)}</b><div class="small muted">${esc(r.email)}</div></td><td class="right">${r.assigned}</td><td class="right"><b>${r.completed}</b></td><td class="right"><span class="status ${r.pending>10?'s-NEEDS_INFO':'s-ASSIGNED'}">${r.pending}</span></td><td class="right">${r.approved}</td><td class="right">${r.rejected}</td><td class="right">${r.needs_info}</td><td class="right money">${esc(fmtMoney(r.amount_reviewed_total,'GBP'))}</td><td class="right">${fmtTime(r.active_seconds)}</td><td class="right">${fmtTime(r.elapsed_tat_avg_seconds)}</td><td class="right">${r.oldest_pending_age_days!=null?r.oldest_pending_age_days+'d':'—'}</td></tr>`).join(''):'<tr><td colspan="11"><div class="empty">No active reviewers.</div></td></tr>'}</tbody></table></div></div>
+  <div class="panel"><div class="panel-head"><h3>${d.rows.length} reviewer${d.rows.length===1?'':'s'}</h3></div><div class="table-wrap"><table class="table"><thead><tr><th>Reviewer</th><th class="right">Assigned</th><th class="right">Completed</th><th class="right">Pending</th><th class="right">Approved</th><th class="right">Rejected</th><th class="right">Need info</th><th class="right">Amount reviewed</th><th class="right" title="Source: recorded Expensyra validation sessions">Active time</th><th class="right" title="Source: assignment/completion timestamps — not recorded session time">Elapsed TAT</th><th class="right">Oldest pending</th></tr></thead><tbody>${d.rows.length?d.rows.map(r=>`<tr class="clickable" data-reviewer="${r.id}"><td><b>${esc(r.name)}</b><div class="small muted">${esc(r.email)}</div></td><td class="right">${r.assigned}${r.reassigned?`<div class="small muted" title="Need info transactions reassigned by an import — included in Assigned">incl. ${r.reassigned} reassigned</div>`:''}</td><td class="right"><b>${r.completed}</b></td><td class="right"><span class="status ${r.pending>10?'s-NEEDS_INFO':'s-ASSIGNED'}">${r.pending}</span></td><td class="right">${r.approved}</td><td class="right">${r.rejected}</td><td class="right">${r.needs_info}</td><td class="right money">${esc(fmtMoney(r.amount_reviewed_total,'GBP'))}</td><td class="right">${fmtTime(r.active_seconds)}</td><td class="right">${fmtTime(r.elapsed_tat_avg_seconds)}</td><td class="right">${r.oldest_pending_age_days!=null?r.oldest_pending_age_days+'d':'—'}</td></tr>`).join(''):'<tr><td colspan="11"><div class="empty">No active reviewers.</div></td></tr>'}</tbody></table></div></div>
   <div class="notice" style="margin-top:16px"><b>Active time</b> is measured from recorded Start/Pause validation sessions (heartbeat-verified). <b>Elapsed TAT</b> is the wall-clock gap between allocation and completion and does not mean the reviewer was actively working that whole time. The two are never combined.</div>`;
   wireDateRangeBar(state.revopsFilters,'rev',()=>renderRevops(c));
   document.querySelectorAll('[data-reviewer]').forEach(tr=>tr.onclick=()=>{state.revopsReviewerId=Number(tr.dataset.reviewer);state.revopsView='detail';renderPage()});

@@ -287,6 +287,23 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_tx ON audit_log(transaction_id, created_at DESC);
 
+    -- One row per assignment handed to a reviewer (new, or a Need info
+    -- transaction reassigned by an import). Review Operations / Team
+    -- Performance count these, so a reassignment adds to the reviewer's
+    -- Assigned total instead of just moving the transaction's date.
+    CREATE TABLE IF NOT EXISTS allocation_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL,
+      reviewer_id INTEGER NOT NULL,
+      allocated_by INTEGER,
+      allocated_at TEXT NOT NULL,
+      allocation_day TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'NEW' CHECK(kind IN ('NEW','REASSIGNED_NEED_INFO')),
+      FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+      FOREIGN KEY(reviewer_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_allocation_events_reviewer ON allocation_events(reviewer_id, allocated_at);
+
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,
       value TEXT,
@@ -566,6 +583,12 @@ function initDb() {
   ensureColumn('transactions','salary_deduction_amount','REAL');
   ensureColumn('reviews','salary_deduction_amount','REAL');
   widenCommercialClassificationCheck();
+  // allocation_events starts with every current assignment as one NEW event,
+  // once, so existing Assigned counts are unchanged on upgrade.
+  if(getKv('allocation_events_seeded')!=='1'){
+    db.exec("INSERT INTO allocation_events(transaction_id,reviewer_id,allocated_by,allocated_at,allocation_day,kind) SELECT id,reviewer_id,allocated_by,allocated_at,COALESCE(allocation_day,substr(allocated_at,1,10)),'NEW' FROM transactions WHERE reviewer_id IS NOT NULL AND allocated_at IS NOT NULL");
+    setKv('allocation_events_seeded','1');
+  }
   // Makes the dataVersion() MAX(updated_at) probe an index lookup, not a scan.
   db.exec('CREATE INDEX IF NOT EXISTS idx_transactions_updated ON transactions(updated_at)');
 }
@@ -699,6 +722,10 @@ function authUser(req) {
 }
 function requireAuth(req,res,roles=null){ const u=authUser(req); if(!u){json(res,401,{error:'Authentication required'});return null;} if(roles && !roles.includes(u.role)){json(res,403,{error:'Insufficient access'});return null;} return u; }
 function audit(txId,actorId,action,detail={}) { db.prepare('INSERT INTO audit_log(transaction_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(txId||null,actorId||null,action,JSON.stringify(detail),iso()); }
+// Every path that hands a transaction to a reviewer records it here.
+function recordAllocation(txId,reviewerId,byId,at,day,kind='NEW'){
+  db.prepare('INSERT INTO allocation_events(transaction_id,reviewer_id,allocated_by,allocated_at,allocation_day,kind) VALUES(?,?,?,?,?,?)').run(txId,reviewerId,byId||null,at,day,kind);
+}
 function getKv(key){return db.prepare('SELECT value FROM app_kv WHERE key=?').get(key)?.value || null;}
 function setKv(key,value){db.prepare(`INSERT INTO app_kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(key,String(value),iso());}
 
@@ -2049,6 +2076,8 @@ function transactionWhere(params,user){
   const classificationStatus=params.get('classification_status');if(classificationStatus){wh.push('t.classification_status=?');args.push(classificationStatus);}
   const categoryStatus=params.get('category_status');if(categoryStatus==='UNRESOLVED'){wh.push("t.category_resolution_status IS NOT NULL AND t.category_resolution_status<>'CATEGORY_RESOLVED'");}else if(categoryStatus){wh.push('t.category_resolution_status=?');args.push(categoryStatus);}
   const {from,to}=parseMonthOrRange({searchParams:params}); if(from){wh.push('date(t.transaction_date)>=date(?)');args.push(from);} if(to){wh.push('date(t.transaction_date)<=date(?)');args.push(to);}
+  const assignedFrom=params.get('assignedDateFrom');if(assignedFrom){wh.push('COALESCE(t.allocation_day,date(t.allocated_at))>=date(?)');args.push(assignedFrom);}
+  const assignedTo=params.get('assignedDateTo');if(assignedTo){wh.push('COALESCE(t.allocation_day,date(t.allocated_at))<=date(?)');args.push(assignedTo);}
   return {whereSql:wh.length?'WHERE '+wh.join(' AND '):'',args};
 }
 
@@ -2094,7 +2123,7 @@ function expenseFilters(url){
 // anything JSAN stores — it's carried through purely for the uploader to
 // cross-reference their own source file.
 const ASSIGN_IMPORT_REQUIRED=['Receipt','Owner','Pleo Reviewer','Expense ID'];
-const ASSIGN_IMPORT_STATUS_LABELS={READY:'Will assign',ALREADY_ASSIGNED:'Already assigned',ALREADY_FINAL:'Already final',OWNER_MISMATCH:'Owner mismatch',REVIEWER_NOT_FOUND:'Reviewer not found',NOT_FOUND:'Expense ID not found'};
+const ASSIGN_IMPORT_STATUS_LABELS={READY:'Will assign',REASSIGN:'Will reassign (Need info)',ALREADY_ASSIGNED:'Already assigned',ALREADY_FINAL:'Already final',OWNER_MISMATCH:'Owner mismatch',REVIEWER_NOT_FOUND:'Reviewer not found',NOT_FOUND:'Expense ID not found'};
 const hasCol=(row,name)=>Object.keys(row).some(k=>norm(k)===norm(name));
 function rowsFromUpload(buffer,filename){
   if(/\.(csv|txt)$/i.test(filename||'')) return parseCsv(buffer.toString('utf8'));
@@ -2121,6 +2150,10 @@ function buildAssignmentImportPreview(rows){
     const reviewer=assignable.find(u=>normEmail(u.email)===normEmail(pleoReviewer));
     if(!reviewer) return {...base,status:'REVIEWER_NOT_FOUND',reason:`No active reviewer or team lead with the email "${pleoReviewer}"`,txId:tx.id};
     if(['APPROVED','REJECTED'].includes(tx.status)) return {...base,status:'ALREADY_FINAL',reason:'This transaction is already approved/rejected',txId:tx.id};
+    // Need info that turns up in a later import is back for verification:
+    // reassign it to the reviewer the file names (it counts as a new
+    // assignment for them in Review Operations).
+    if(tx.status==='NEEDS_INFO') return {...base,status:'REASSIGN',reason:`Was Need info${tx.reviewer_name?` with ${tx.reviewer_name}`:''} — reassigned to ${reviewer.name}`,txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name,previousReviewerId:tx.reviewer_id};
     // A daily re-import must never silently move an open transaction off
     // whoever currently has it — even if the file names someone else — so
     // any existing reviewer (regardless of who) stops the row here.
@@ -2129,7 +2162,7 @@ function buildAssignmentImportPreview(rows){
     return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name,backfillOwner,...(backfillOwner?{reason:`Owner was unknown on this transaction — will be set to "${owner}"`}:{})};
   });
   const summary={total:out.length};
-  for(const s of ['READY','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
+  for(const s of ['READY','REASSIGN','ALREADY_ASSIGNED','ALREADY_FINAL','OWNER_MISMATCH','REVIEWER_NOT_FOUND','NOT_FOUND']) summary[s]=out.filter(r=>r.status===s).length;
   return {rows:out,summary};
 }
 // Downloadable template so uploaders know the exact shape expected — two
@@ -2194,7 +2227,7 @@ async function api(req,res,url){
       const {from:rawFrom,to:rawTo}=parseMonthOrRange(url);
       const from=rawFrom||today(),to=rawTo||today();
       const rows=db.prepare(`SELECT usr.id,usr.name,usr.email,usr.role,
-        (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.allocation_day BETWEEN ?1 AND ?2) assigned_today,
+        (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.allocation_day BETWEEN ?1 AND ?2) assigned_today,
         (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2) validations_today,
         (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2 AND r.decision='APPROVED') approved_today,
         (SELECT COUNT(*) FROM reviews r WHERE r.user_id=usr.id AND r.business_day BETWEEN ?1 AND ?2 AND r.decision='REJECTED') rejected_today,
@@ -2357,7 +2390,8 @@ async function api(req,res,url){
       const u=requireAuth(req,res,['ADMIN','TEAM_LEAD','FINANCE_QC']);if(!u)return;
       const {from,to}=parseMonthOrRange(url);
       const rows=db.prepare(`SELECT usr.id,usr.name,usr.email,
-        (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND (?1 IS NULL OR date(t.allocated_at)>=date(?1)) AND (?2 IS NULL OR date(t.allocated_at)<=date(?2))) assigned,
+        (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) assigned,
+        (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.kind='REASSIGNED_NEED_INFO' AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) reassigned,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('APPROVED','REJECTED') AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) completed,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO')) pending,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status='APPROVED' AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) approved,
@@ -2415,25 +2449,24 @@ async function api(req,res,url){
     if(req.method==='GET'&&url.pathname==='/api/transactions') return json(res,200,transactionList(url,user));
     // Auto-advance: the next transaction assigned to the caller that is ready
     // to verify.
-    // - Fresh work (ASSIGNED / IN_REVIEW) comes first, oldest allocation first.
-    // - A NEEDS_INFO transaction comes back only from the business day AFTER
-    //   it was marked Need info, giving the employee a day to respond. Today's
-    //   Need info decisions are never handed straight back (auto-opening starts
-    //   the timer, which would silently flip them to IN_REVIEW).
+    // - ASSIGNED / IN_REVIEW only, oldest allocation first. Need info items
+    //   wait for the employee and come back through reassignment.
     // - The caller's Transactions filters (same params as /api/transactions,
     //   e.g. employee=<driver>) narrow the pick, so a reviewer working one
     //   driver keeps getting that driver. Its status filter is ignored: the
     //   readiness rule above decides status.
-    // When nothing is left, the response says why (Need info waiting for
-    // tomorrow) and, if a filter was the reason, which other drivers still
+    // When nothing is left, the response says why (Need info waiting on the
+    // employee) and, if a filter was the reason, which other drivers still
     // have work, so the client can offer to switch.
     // ?exclude=<id> leaves out the one just decided, as a safeguard.
     // id breaks ties — bulk allocation stamps many rows with one allocated_at.
     if(req.method==='GET'&&url.pathname==='/api/transactions/next'){
       const exclude=Number(url.searchParams.get('exclude'))||0;
-      const day=today();
-      const lastNeedInfoDay="(SELECT r.business_day FROM reviews r WHERE r.transaction_id=t.id AND r.decision='NEEDS_INFO' ORDER BY r.id DESC LIMIT 1)";
-      const READY=`(t.status IN ('ASSIGNED','IN_REVIEW') OR (t.status='NEEDS_INFO' AND COALESCE(${lastNeedInfoDay},'')<?))`;
+      // NEEDS_INFO is never handed back to the reviewer: it waits for the
+      // employee, and comes back through the next assignment import that
+      // lists it (see buildAssignmentImportPreview, REASSIGN). Auto-opening
+      // one would start its timer and pull it out of Need info.
+      const READY="t.status IN ('ASSIGNED','IN_REVIEW')";
       // Reviewers only ever get their own transactions (transactionWhere
       // enforces it). Admin / team lead / QC can verify anyone's: with a filter
       // set (driver, reviewer, month…) the next one comes from exactly that
@@ -2448,15 +2481,15 @@ async function api(req,res,url){
         return {where:wh.length?wh.join(' AND ')+' AND ':'',args};
       };
       const s=scoped(url.searchParams,!filtered);
-      const row=db.prepare(`SELECT t.id,t.status,${lastNeedInfoDay} need_info_day FROM transactions t WHERE ${s.where}${READY} AND t.id<>? ORDER BY CASE WHEN t.status='NEEDS_INFO' THEN 1 ELSE 0 END, t.allocated_at ASC, t.id ASC LIMIT 1`).get(...s.args,day,exclude);
-      if(row)return json(res,200,{id:row.id,returningFromNeedInfo:row.status==='NEEDS_INFO'?{markedDay:row.need_info_day}:null});
-      const waitingNeedInfo=db.prepare(`SELECT COUNT(*) n FROM transactions t WHERE ${s.where}t.status='NEEDS_INFO' AND COALESCE(${lastNeedInfoDay},'')>=?`).get(...s.args,day).n;
+      const row=db.prepare(`SELECT t.id FROM transactions t WHERE ${s.where}${READY} AND t.id<>? ORDER BY t.allocated_at ASC, t.id ASC LIMIT 1`).get(...s.args,exclude);
+      if(row)return json(res,200,{id:row.id});
+      const waitingNeedInfo=db.prepare(`SELECT COUNT(*) n FROM transactions t WHERE ${s.where}t.status='NEEDS_INFO'`).get(...s.args).n;
       let otherDrivers=[];
       if(filtered){
         // Every driver with work, across reviewers for admin roles — the
         // popup switches to "this driver only", which is scoped the same way.
         const all=scoped(new URLSearchParams(),false);
-        otherDrivers=db.prepare(`SELECT t.employee_id,COALESCE(MAX(t.employee_name),t.employee_id,'Unknown employee') employee_name,COUNT(*) n FROM transactions t WHERE ${all.where}${READY} AND t.id<>? GROUP BY t.employee_id ORDER BY employee_name`).all(...all.args,day,exclude);
+        otherDrivers=db.prepare(`SELECT t.employee_id,COALESCE(MAX(t.employee_name),t.employee_id,'Unknown employee') employee_name,COUNT(*) n FROM transactions t WHERE ${all.where}${READY} AND t.id<>? GROUP BY t.employee_id ORDER BY employee_name`).all(...all.args,exclude);
       }
       const employee=url.searchParams.get('employee');
       const driverName=employee?db.prepare('SELECT MAX(employee_name) n FROM transactions WHERE employee_id=?').get(employee)?.n||null:null;
@@ -2520,11 +2553,11 @@ async function api(req,res,url){
         if(b.expected_count!=null&&Number(b.expected_count)!==matched.length)return json(res,409,{error:`The matching set changed (now ${matched.length} transactions) — refresh the list and try again`,matched:matched.length});
         const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
         let n=0,skippedFinal=0;db.exec('BEGIN');
-        try{for(const r of matched){if(['APPROVED','REJECTED'].includes(r.status)){skippedFinal++;continue;}upd.run(reviewer.id,u.id,t,day,t,r.id);audit(r.id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,bulk_filter:Object.fromEntries(params)});n++;}db.exec('COMMIT');}
+        try{for(const r of matched){if(['APPROVED','REJECTED'].includes(r.status)){skippedFinal++;continue;}upd.run(reviewer.id,u.id,t,day,t,r.id);recordAllocation(r.id,reviewer.id,u.id,t,day);audit(r.id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,bulk_filter:Object.fromEntries(params)});n++;}db.exec('COMMIT');}
         catch(e){db.exec('ROLLBACK');throw e;}
         return json(res,200,{ok:true,assigned:n,skippedFinal});
       }
-      const ids=(Array.isArray(b.transaction_ids)?b.transaction_ids:[b.transaction_id]).map(Number).filter(Boolean);if(!ids.length)return json(res,400,{error:'No transactions selected'});let n=0;const t=iso(),day=today();for(const id of ids){const tx=rowTx(id);if(!tx)continue;if(['APPROVED','REJECTED'].includes(tx.status)&&!b.force)continue;db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status=CASE WHEN status IN ('APPROVED','REJECTED') THEN status ELSE 'ASSIGNED' END,updated_at=? WHERE id=?").run(reviewer.id,u.id,t,day,t,id);audit(id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name});n++;}return json(res,200,{ok:true,assigned:n});
+      const ids=(Array.isArray(b.transaction_ids)?b.transaction_ids:[b.transaction_id]).map(Number).filter(Boolean);if(!ids.length)return json(res,400,{error:'No transactions selected'});let n=0;const t=iso(),day=today();for(const id of ids){const tx=rowTx(id);if(!tx)continue;if(['APPROVED','REJECTED'].includes(tx.status)&&!b.force)continue;db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status=CASE WHEN status IN ('APPROVED','REJECTED') THEN status ELSE 'ASSIGNED' END,updated_at=? WHERE id=?").run(reviewer.id,u.id,t,day,t,id);recordAllocation(id,reviewer.id,u.id,t,day);audit(id,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name});n++;}return json(res,200,{ok:true,assigned:n});
     }
     if(req.method==='GET'&&url.pathname==='/api/assign/import/template'){
       const u=requireAuth(req,res,['ADMIN','TEAM_LEAD']);if(!u)return;
@@ -2562,27 +2595,39 @@ async function api(req,res,url){
       const b=await readJson(req);const entry=assignImportPreviews.get(String(b.token||''));
       if(!entry)return json(res,400,{error:'This preview has expired. Upload the file again.'});
       assignImportPreviews.delete(String(b.token));
-      const ready=entry.rows.filter(r=>r.status==='READY');
+      // READY = new assignment; REASSIGN = a Need info transaction back for
+      // verification. Both are re-checked against the transaction's state
+      // right now, not the (possibly stale) preview.
+      const ready=entry.rows.filter(r=>r.status==='READY'||r.status==='REASSIGN');
       const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
-      let assigned=0,skipped=0;
+      let assigned=0,reassigned=0,skipped=0;
       db.exec('BEGIN');
       try{
         for(const r of ready){
           const tx=rowTx(r.txId);
           const reviewer=db.prepare("SELECT id,name,active,role FROM users WHERE id=?").get(r.reviewerId);
-          if(!tx||['APPROVED','REJECTED'].includes(tx.status)||tx.reviewer_id||!reviewer||!reviewer.active||!['REVIEWER','TEAM_LEAD'].includes(reviewer.role)){skipped++;continue;}
+          const okReviewer=reviewer&&reviewer.active&&['REVIEWER','TEAM_LEAD'].includes(reviewer.role);
+          if(r.status==='REASSIGN'){
+            if(!tx||tx.status!=='NEEDS_INFO'||!okReviewer){skipped++;continue;}
+            upd.run(reviewer.id,u.id,t,day,t,r.txId);
+            recordAllocation(r.txId,reviewer.id,u.id,t,day,'REASSIGNED_NEED_INFO');
+            audit(r.txId,u.id,'REASSIGNED_FROM_NEED_INFO',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,previous_reviewer_id:tx.reviewer_id||null,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId});
+            reassigned++;continue;
+          }
+          if(!tx||['APPROVED','REJECTED'].includes(tx.status)||tx.reviewer_id||!okReviewer){skipped++;continue;}
           // Owner was unknown (deleted from Pleo before JSAN ever synced it) —
           // trust the file's Owner and backfill it, re-checked against the
           // transaction's current state rather than the stale preview.
           const backfilled=r.backfillOwner&&!tx.employee_name;
           if(backfilled){db.prepare('UPDATE transactions SET employee_name=?,updated_at=? WHERE id=?').run(clampText(r.backfillOwner,200),t,r.txId);recalculateTransactionQuality(r.txId);}
           upd.run(reviewer.id,u.id,t,day,t,r.txId);
+          recordAllocation(r.txId,reviewer.id,u.id,t,day);
           audit(r.txId,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId,...(backfilled?{owner_backfilled:r.backfillOwner}:{})});
           assigned++;
         }
         db.exec('COMMIT');
       }catch(e){db.exec('ROLLBACK');throw e;}
-      return json(res,200,{ok:true,assigned,skipped,total:ready.length});
+      return json(res,200,{ok:true,assigned,reassigned,skipped,total:ready.length});
     }
     // Send a transaction back to Unassigned — the reverse of /api/assign, same
     // two modes (explicit ids, or a filter + expected_count for "all

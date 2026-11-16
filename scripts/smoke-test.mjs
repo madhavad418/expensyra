@@ -154,10 +154,23 @@ try{
   if(x.p.assigned!==17) fail(`Bulk filter allocation should assign 17, got ${JSON.stringify(x.p)}`);
   x=await req(`/api/transactions?reviewer_id=${reviewer2Id}&limit=50`,{cookie:adminCookie});
   if(x.p.total!==17||x.p.rows.some(r=>r.id===txId)) fail('Bulk allocation touched the wrong transactions');
+  const assignmentDay=String(x.p.rows[0]?.allocation_day||'');
+  if(!assignmentDay) fail('Allocated transaction is missing its assignment day');
+  const priorAssignmentDay=new Date(`${assignmentDay}T00:00:00.000Z`);
+  priorAssignmentDay.setUTCDate(priorAssignmentDay.getUTCDate()-1);
+  const assignmentDb=new DatabaseSync(path.join(dir,'smoke.db'));
+  assignmentDb.prepare('UPDATE transactions SET allocated_at=? WHERE id=?').run(`${priorAssignmentDay.toISOString().slice(0,10)}T23:30:00.000Z`,x.p.rows[0].id);
+  assignmentDb.close();
+  x=await req(`/api/transactions?reviewer_id=${reviewer2Id}&assignedDateFrom=${assignmentDay}&assignedDateTo=${assignmentDay}`,{cookie:adminCookie});
+  if(x.p.total!==17) fail(`Assignment date range should match all 17 transactions allocated that day, got ${x.p.total}`);
   x=await req(`/api/transactions?reviewer_id=${reviewer2Id}`,{cookie:reviewerCookie});
   if(x.p.total!==0||x.p.rows.length||x.p.evidenceCounts.total||Object.keys(x.p.statusCounts).length) fail('Reviewer filter must not expose another reviewer assignments');
   x=await req('/api/transactions?limit=50',{cookie:reviewerCookie});
   if(x.p.total!==1||x.p.rows[0].id!==txId||x.p.statusCounts.APPROVED!==1) fail('Completed assigned transactions must remain visible');
+  const reviewerAssignmentDay=String(x.p.rows[0].allocation_day||'');
+  if(!reviewerAssignmentDay) fail('Reviewer transaction is missing its assignment timestamp');
+  x=await req(`/api/transactions?assignedDateFrom=${reviewerAssignmentDay}&assignedDateTo=${reviewerAssignmentDay}`,{cookie:reviewerCookie});
+  if(x.p.total!==1||x.p.rows[0].id!==txId) fail('Reviewer assignment date range should include their assigned transaction');
   // Give only this isolated fixture billed production fields; mock spending is excluded.
   const spendDb=new DatabaseSync(path.join(dir,'smoke.db'));
   spendDb.exec("UPDATE transactions SET source_system='PLEO',source_environment='PRODUCTION',source_kind='API',bill_currency=currency,bill_amount=-amount,pleo_status='COMPLETED',pleo_family='CARD_PURCHASE'");
