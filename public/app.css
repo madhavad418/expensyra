@@ -135,6 +135,9 @@ a{color:inherit}
 .btn-dark{background:var(--jsan-bg-dark);color:#fff}
 .btn-dark:hover{background:var(--jsan-primary-hover)}
 .btn-soft{background:var(--jsan-info-bg);color:var(--jsan-primary)}
+/* Excel download (e.g. assignment issues report): solid Excel green so it stands out. */
+.btn-excel{background:#1d6f42;color:#fff}
+.btn-excel:hover:not(:disabled){background:#155232}
 .btn-ghost{background:transparent;color:inherit;border:1px solid #dde3ea}
 .btn-danger{background:var(--jsan-bad-bg);color:var(--jsan-bad)}
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}

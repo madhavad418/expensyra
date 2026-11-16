@@ -101,8 +101,13 @@ assert.equal(p.salary_deduction,20,'convert actual deduction once, despite paren
 assert.equal(p.unclassified,3);assert.equal(p.count,7);
 assert.equal(p.customer_billable+p.jsan_internal+p.reimbursement+p.salary_deduction+p.unclassified-p.refund,168);
 assert.equal(commercial.length,4,'separate projects, currencies and months');
-const missing=summarizeCommercialExpenses([{...commercialBase,salary_deduction_amount:null}])[0];
-assert.equal(missing.salary_deduction,0);assert.equal(missing.missing_deductions,1);assert.equal(missing.unclassified,100);
+// Salary deduction with no amount = the whole expense is deducted from salary;
+// nothing goes to JSAN internal / Customer billable or Unclassified.
+const full=summarizeCommercialExpenses([{...commercialBase,salary_deduction_amount:null}])[0];
+assert.equal(full.salary_deduction,100);assert.equal(full.jsan_internal,0);assert.equal(full.unclassified,0);assert.equal(full.missing_deductions,0);
+// Project cost has its own total and is part of the full amount.
+const projectCost=summarizeCommercialExpenses([{...commercialBase,commercial_classification:'PROJECT_COST',salary_deduction_amount:null}])[0];
+assert.equal(projectCost.project_cost,100);assert.equal(projectCost.unclassified,0);
 assert.deepEqual(summarizeCommercialExpenses([]),[]);
 // Salary deduction recorded on Customer billable / JSAN internal: split, never double-counted.
 const split=summarizeCommercialExpenses([

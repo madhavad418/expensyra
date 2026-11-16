@@ -82,10 +82,16 @@ const cfg = {
 // Reviewer-chosen commercial classification. The legacy values stay valid in
 // the database so earlier decisions keep their meaning, but new reviews pick
 // from the active list only.
-const COMMERCIAL_CLASSIFICATIONS = ['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION','REFUND','REIMBURSEMENT'];
-// Classifications a salary deduction can be recorded on (SALARY_DEDUCTION = legacy).
-const SALARY_DEDUCTION_CLASSES = ['CUSTOMER_BILLABLE','JSAN_INTERNAL','SALARY_DEDUCTION'];
-const LEGACY_COMMERCIAL_CLASSIFICATIONS = ['PROJECT_COST','SHARED_COST'];
+// SALARY_DEDUCTION = the whole expense is repaid from salary (nothing goes to
+// Customer billable / JSAN internal). PROJECT_COST is active again with its
+// own total.
+const COMMERCIAL_CLASSIFICATIONS = ['CUSTOMER_BILLABLE','JSAN_INTERNAL','PROJECT_COST','SALARY_DEDUCTION','REFUND','REIMBURSEMENT'];
+// Classifications a partial salary deduction amount can be recorded on. A
+// SALARY_DEDUCTION expense never takes an amount — it is the full expense.
+// (Older SALARY_DEDUCTION reviews saved with a partial amount keep their
+// split: see summarizeCommercialExpenses.)
+const SALARY_DEDUCTION_CLASSES = ['CUSTOMER_BILLABLE','JSAN_INTERNAL'];
+const LEGACY_COMMERCIAL_CLASSIFICATIONS = ['SHARED_COST'];
 const COMMERCIAL_CLASSIFICATION_CHECK = `commercial_classification TEXT CHECK(commercial_classification IS NULL OR commercial_classification IN (${[...COMMERCIAL_CLASSIFICATIONS,...LEGACY_COMMERCIAL_CLASSIFICATIONS].map(v=>`'${v}'`).join(',')}))`;
 const CAR_RENTAL_SHEET = '2026 Car Rental Master Data';
 const CAR_RENTAL_SOURCE_URL = process.env.CAR_RENTAL_WORKBOOK_URL || 'https://netorgft3705709-my.sharepoint.com/:x:/g/personal/rk_jsanconsulting_com/IQBsZsiAzPcASoXJba7eVPEuAVrbKbEbio6DbYnME54bsAs?CID=e8327d73-a49b-e694-f281-bd4bfcf98ebd&download=1';
@@ -2653,13 +2659,12 @@ async function api(req,res,url){
     if(req.method==='POST'&&completeMatch){const id=Number(completeMatch[1]);const tx=rowTx(id);if(!tx)return json(res,404,{error:'Not found'});if(tx.reviewer_id!==user.id&&!['ADMIN','TEAM_LEAD','FINANCE_QC'].includes(user.role))return json(res,403,{error:'This transaction is not assigned to you'});if(['APPROVED','REJECTED'].includes(tx.status))return json(res,409,{error:'This decision is final. Use "Edit & re-check" to reopen it first.'});const b=await readJson(req);const decision=String(b.decision||'').toUpperCase();if(!['APPROVED','REJECTED','NEEDS_INFO'].includes(decision))return json(res,400,{error:'Decision must be APPROVED, REJECTED or NEEDS_INFO'});const classification=b.commercial_classification?String(b.commercial_classification).toUpperCase():null;if(decision==='APPROVED'&&!classification)return json(res,400,{error:'Commercial classification is required for approval'});if(classification&&!COMMERCIAL_CLASSIFICATIONS.includes(classification))return json(res,400,{error:`Commercial classification must be one of: ${COMMERCIAL_CLASSIFICATIONS.join(', ')}`});if(decision==='APPROVED'&&classification==='CUSTOMER_BILLABLE'&&!b.project_code)return json(res,400,{error:'Project is required for customer-billable expenses'});
       // Salary deduction: how much of this expense the employee repays, in the
       // transaction currency — optional on Customer billable / JSAN internal
-      // (0 = none), never more than the expense. Legacy SALARY_DEDUCTION
-      // reviews still need an amount to approve.
+      // (0 = none), never more than the expense. SALARY_DEDUCTION takes no
+      // amount: the whole expense is the deduction.
       let salaryDeduction=null;
       if(SALARY_DEDUCTION_CLASSES.includes(classification)){
         const raw=b.salary_deduction_amount,max=Math.abs(Number(tx.amount)||0);
         if(raw!=null&&raw!==''){const v=Math.round(Number(raw)*100)/100;if(!Number.isFinite(v)||v<0)return json(res,400,{error:'Salary deduction must be 0 or more'});if(v>max+0.005)return json(res,400,{error:`Salary deduction cannot exceed the transaction amount (${max.toFixed(2)} ${tx.currency||''})`.trim()});salaryDeduction=v>0?v:null;}
-        if(classification==='SALARY_DEDUCTION'&&decision==='APPROVED'&&salaryDeduction==null)return json(res,400,{error:'Enter the salary deduction amount'});
       }if(decision!=='APPROVED'&&!String(b.notes||'').trim())return json(res,400,{error:'Reviewer notes are required for Reject / Need Info'});const reviewProject=b.project_code?db.prepare('SELECT id,code FROM projects WHERE code=?').get(String(b.project_code)):null;if(b.project_code&&!reviewProject)return json(res,400,{error:'Unknown project code'});
       const s=db.prepare('SELECT * FROM work_sessions WHERE transaction_id=? AND user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1').get(id,user.id);
       if(!s||Date.now()-Date.parse(s.last_heartbeat_at)>cfg.idleSeconds*1000){if(s)closeSession(s,'IDLE_TIMEOUT',new Date());return json(res,409,{error:'Click Start validation before editing or submitting a decision.'});}
