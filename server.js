@@ -2410,13 +2410,14 @@ async function api(req,res,url){
     // Auto-advance: the next pending transaction assigned to the caller,
     // oldest allocation first — same ordering as "Current queue" in Review
     // Operations, so this is never a surprise ordering to the reviewer.
-    // ?exclude=<id> leaves out the one just decided — a Needs info decision
-    // keeps a transaction in this same pending set, so without excluding it
-    // the oldest-first order would hand the reviewer right back the thing
-    // they just set aside instead of moving on.
+    // NEEDS_INFO is deliberately left out: those are waiting on the employee,
+    // and auto-opening one would start its timer and silently flip it back to
+    // IN_REVIEW. The reviewer reopens them by hand once the info arrives.
+    // ?exclude=<id> still leaves out the one just decided, as a safeguard.
+    // id breaks ties — bulk allocation stamps many rows with one allocated_at.
     if(req.method==='GET'&&url.pathname==='/api/transactions/next'){
       const exclude=Number(url.searchParams.get('exclude'))||0;
-      const row=db.prepare("SELECT id FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO') AND id<>? ORDER BY allocated_at ASC LIMIT 1").get(user.id,exclude);
+      const row=db.prepare("SELECT id FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW') AND id<>? ORDER BY allocated_at ASC, id ASC LIMIT 1").get(user.id,exclude);
       return json(res,200,{id:row?.id??null});
     }
     const txMatch=url.pathname.match(/^\/api\/transactions\/(\d+)$/);
