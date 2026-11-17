@@ -304,6 +304,30 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_allocation_events_reviewer ON allocation_events(reviewer_id, allocated_at);
 
+    -- Each confirmed assignment import file, and how many of its rows named
+    -- each reviewer (by the file's Pleo Reviewer email). Review Operations
+    -- compares this with the Assigned breakdown; the latest import of a day
+    -- is that day's file.
+    CREATE TABLE IF NOT EXISTS assignment_import_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT,
+      imported_by INTEGER,
+      imported_at TEXT NOT NULL,
+      import_day TEXT NOT NULL,
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      unmatched_rows INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY(imported_by) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignment_import_runs_day ON assignment_import_runs(import_day);
+    CREATE TABLE IF NOT EXISTS assignment_import_rows (
+      run_id INTEGER NOT NULL,
+      reviewer_id INTEGER NOT NULL,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(run_id, reviewer_id),
+      FOREIGN KEY(run_id) REFERENCES assignment_import_runs(id) ON DELETE CASCADE,
+      FOREIGN KEY(reviewer_id) REFERENCES users(id)
+    );
+
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,
       value TEXT,
@@ -2399,6 +2423,8 @@ async function api(req,res,url){
         (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) assigned,
         (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.kind='REASSIGNED_NEED_INFO' AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) reassigned,
         (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.carried_over=1 AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) carried_over,
+        (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.kind='NEW' AND e.carried_over=0 AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) new_assigned,
+        (SELECT COALESCE(SUM(x.row_count),0) FROM assignment_import_rows x WHERE x.reviewer_id=usr.id AND x.run_id IN (SELECT MAX(ir.id) FROM assignment_import_runs ir WHERE (?1 IS NULL OR ir.import_day>=?1) AND (?2 IS NULL OR ir.import_day<=?2) GROUP BY ir.import_day)) file_rows,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('APPROVED','REJECTED') AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) completed,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO')) pending,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status='APPROVED' AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) approved,
@@ -2419,7 +2445,10 @@ async function api(req,res,url){
         backlog_over_3d: db.prepare(`SELECT COUNT(*) c FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO') AND allocated_at<=?`).get(r.id, iso(new Date(nowMs-3*86400000))).c,
         backlog_over_7d: db.prepare(`SELECT COUNT(*) c FROM transactions WHERE reviewer_id=? AND status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO') AND allocated_at<=?`).get(r.id, iso(new Date(nowMs-7*86400000))).c,
       }));
-      return json(res,200,{filters:{from,to},rows:withComputed});
+      // Which import files the "Rows in file" column comes from: the latest
+      // confirmed import of each day in the range.
+      const importFiles=db.prepare(`SELECT ir.import_day day,ir.filename,ir.imported_at,ir.total_rows,ir.unmatched_rows FROM assignment_import_runs ir WHERE ir.id IN (SELECT MAX(id) FROM assignment_import_runs WHERE (?1 IS NULL OR import_day>=?1) AND (?2 IS NULL OR import_day<=?2) GROUP BY import_day) ORDER BY ir.import_day`).all(from,to);
+      return json(res,200,{filters:{from,to},rows:withComputed,importFiles});
     }
     const reviewerDetailMatch=url.pathname.match(/^\/api\/analytics\/reviewers\/(\d+)$/);
     if(req.method==='GET'&&reviewerDetailMatch){
@@ -2644,6 +2673,15 @@ async function api(req,res,url){
           recordAllocation(tx.id,tx.reviewer_id,u.id,t,day,'NEW',1);
           carriedOver++;
         }
+        // The file itself, rows per reviewer it names (every row, whatever
+        // its result), for Review Operations' file-vs-Assigned breakdown.
+        const byEmail=new Map(db.prepare('SELECT id,email FROM users').all().map(x=>[String(x.email||'').trim().toLowerCase(),x.id]));
+        const perReviewer=new Map();let unmatched=0;
+        for(const r of entry.rows){const rid=byEmail.get(String(r.pleoReviewer||'').trim().toLowerCase());if(rid)perReviewer.set(rid,(perReviewer.get(rid)||0)+1);else unmatched++;}
+        const run=db.prepare('INSERT INTO assignment_import_runs(filename,imported_by,imported_at,import_day,total_rows,unmatched_rows) VALUES(?,?,?,?,?,?)').run(entry.filename||null,u.id,t,day,entry.rows.length,unmatched);
+        const runId=Number(run.lastInsertRowid);
+        const addRow=db.prepare('INSERT INTO assignment_import_rows(run_id,reviewer_id,row_count) VALUES(?,?,?)');
+        for(const [rid,n] of perReviewer)addRow.run(runId,rid,n);
         db.exec('COMMIT');
       }catch(e){db.exec('ROLLBACK');throw e;}
       return json(res,200,{ok:true,assigned,reassigned,carriedOver,skipped,total:ready.length});

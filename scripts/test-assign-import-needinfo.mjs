@@ -95,6 +95,15 @@ try{
   check('import 3: counts unchanged',ops2?.assigned===4,JSON.stringify(ops2));
   check('import 3: same-day re-import counts nothing as carried over',imp.done.carriedOver===0,JSON.stringify(imp.done));
 
+  // Assigned breakdown: New / Reassigned / Carried over and the day's latest file.
+  const bd=(await req('/api/analytics/reviewers',{cookie:admin})).p;
+  const b1=bd.rows.find(r=>r.id===r1),b2=bd.rows.find(r=>r.id===r2);
+  check('breakdown: Reviewer One new 3, reassigned 1, carried 0',b1?.new_assigned===3&&b1?.reassigned===1&&b1?.carried_over===0,JSON.stringify(b1));
+  check('breakdown: rows in file come from the latest import of the day only',b1?.file_rows===3&&b2?.file_rows===1,JSON.stringify([b1?.file_rows,b2?.file_rows]));
+  check('breakdown: import file listed for the range',bd.importFiles?.length===1&&bd.importFiles[0].total_rows===4&&bd.importFiles[0].filename==='assignments.csv',JSON.stringify(bd.importFiles));
+  const old=(await req('/api/analytics/reviewers?dateFrom=2000-01-01&dateTo=2000-01-02',{cookie:admin})).p;
+  check('breakdown: a range with no import has no file rows',old.importFiles.length===0&&old.rows.every(r=>r.file_rows===0),JSON.stringify(old.importFiles));
+
   // Next day: move every assignment record back one day, then import the same file.
   // A, B (One) and D (Two) are still open with their reviewer -> carried over and
   // counted for the new day; C is approved -> not counted.
