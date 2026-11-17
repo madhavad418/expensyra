@@ -582,6 +582,10 @@ function initDb() {
   // (syncs overwrite it); the net figure is amount minus this.
   ensureColumn('transactions','salary_deduction_amount','REAL');
   ensureColumn('reviews','salary_deduction_amount','REAL');
+  // 1 = the transaction was already with this reviewer (still unverified) and
+  // was listed again in that day's assignment import: it counts toward the
+  // day's Assigned without moving anything.
+  ensureColumn('allocation_events','carried_over','INTEGER NOT NULL DEFAULT 0');
   widenCommercialClassificationCheck();
   // allocation_events starts with every current assignment as one NEW event,
   // once, so existing Assigned counts are unchanged on upgrade.
@@ -723,8 +727,8 @@ function authUser(req) {
 function requireAuth(req,res,roles=null){ const u=authUser(req); if(!u){json(res,401,{error:'Authentication required'});return null;} if(roles && !roles.includes(u.role)){json(res,403,{error:'Insufficient access'});return null;} return u; }
 function audit(txId,actorId,action,detail={}) { db.prepare('INSERT INTO audit_log(transaction_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(txId||null,actorId||null,action,JSON.stringify(detail),iso()); }
 // Every path that hands a transaction to a reviewer records it here.
-function recordAllocation(txId,reviewerId,byId,at,day,kind='NEW'){
-  db.prepare('INSERT INTO allocation_events(transaction_id,reviewer_id,allocated_by,allocated_at,allocation_day,kind) VALUES(?,?,?,?,?,?)').run(txId,reviewerId,byId||null,at,day,kind);
+function recordAllocation(txId,reviewerId,byId,at,day,kind='NEW',carriedOver=0){
+  db.prepare('INSERT INTO allocation_events(transaction_id,reviewer_id,allocated_by,allocated_at,allocation_day,kind,carried_over) VALUES(?,?,?,?,?,?,?)').run(txId,reviewerId,byId||null,at,day,kind,carriedOver?1:0);
 }
 function getKv(key){return db.prepare('SELECT value FROM app_kv WHERE key=?').get(key)?.value || null;}
 function setKv(key,value){db.prepare(`INSERT INTO app_kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(key,String(value),iso());}
@@ -2157,7 +2161,9 @@ function buildAssignmentImportPreview(rows){
     // A daily re-import must never silently move an open transaction off
     // whoever currently has it — even if the file names someone else — so
     // any existing reviewer (regardless of who) stops the row here.
-    if(tx.reviewer_id) return {...base,status:'ALREADY_ASSIGNED',reason:tx.reviewer_id===reviewer.id?`Already assigned to ${reviewer.name}`:`Already assigned to ${tx.reviewer_name||'someone else'} — not reassigned`,txId:tx.id,reviewerId:tx.reviewer_id,reviewerName:tx.reviewer_name||reviewer.name};
+    // Not moved, but still open work listed in today's file: it counts toward
+    // today's Assigned for whoever holds it (see the import confirm).
+    if(tx.reviewer_id) return {...base,status:'ALREADY_ASSIGNED',reason:tx.reviewer_id===reviewer.id?`Already assigned to ${reviewer.name} — counted in today's Assigned`:`Already assigned to ${tx.reviewer_name||'someone else'} — not reassigned, counted for them`,txId:tx.id,reviewerId:tx.reviewer_id,reviewerName:tx.reviewer_name||reviewer.name};
     const backfillOwner=owner&&ownerUnknown?owner:null;
     return {...base,status:'READY',txId:tx.id,reviewerId:reviewer.id,reviewerName:reviewer.name,backfillOwner,...(backfillOwner?{reason:`Owner was unknown on this transaction — will be set to "${owner}"`}:{})};
   });
@@ -2392,6 +2398,7 @@ async function api(req,res,url){
       const rows=db.prepare(`SELECT usr.id,usr.name,usr.email,
         (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) assigned,
         (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.kind='REASSIGNED_NEED_INFO' AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) reassigned,
+        (SELECT COUNT(*) FROM allocation_events e WHERE e.reviewer_id=usr.id AND e.carried_over=1 AND (?1 IS NULL OR e.allocation_day>=?1) AND (?2 IS NULL OR e.allocation_day<=?2)) carried_over,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('APPROVED','REJECTED') AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) completed,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status IN ('ASSIGNED','IN_REVIEW','NEEDS_INFO')) pending,
         (SELECT COUNT(*) FROM transactions t WHERE t.reviewer_id=usr.id AND t.status='APPROVED' AND (?1 IS NULL OR date(t.completed_at)>=date(?1)) AND (?2 IS NULL OR date(t.completed_at)<=date(?2))) approved,
@@ -2600,7 +2607,7 @@ async function api(req,res,url){
       // right now, not the (possibly stale) preview.
       const ready=entry.rows.filter(r=>r.status==='READY'||r.status==='REASSIGN');
       const t=iso(),day=today();const upd=db.prepare("UPDATE transactions SET reviewer_id=?,allocated_by=?,allocated_at=?,allocation_day=?,status='ASSIGNED',updated_at=? WHERE id=?");
-      let assigned=0,reassigned=0,skipped=0;
+      let assigned=0,reassigned=0,carriedOver=0,skipped=0;
       db.exec('BEGIN');
       try{
         for(const r of ready){
@@ -2625,9 +2632,21 @@ async function api(req,res,url){
           audit(r.txId,u.id,'ALLOCATED',{reviewer_id:reviewer.id,reviewer_name:reviewer.name,imported:true,source_file:entry.filename,receipt:r.receipt,owner:r.owner,expense_id:r.expenseId,...(backfilled?{owner_backfilled:r.backfillOwner}:{})});
           assigned++;
         }
+        // ALREADY_ASSIGNED = still open with a reviewer and listed again: not
+        // moved, but counted toward today's Assigned for whoever holds it.
+        // At most once per transaction/reviewer/day, so importing the same
+        // file twice — or a row assigned or reassigned earlier today — never
+        // counts twice.
+        const already=db.prepare('SELECT 1 FROM allocation_events WHERE transaction_id=? AND reviewer_id=? AND allocation_day=? LIMIT 1');
+        for(const r of entry.rows.filter(r=>r.status==='ALREADY_ASSIGNED')){
+          const tx=rowTx(r.txId);
+          if(!tx||!tx.reviewer_id||!['ASSIGNED','IN_REVIEW'].includes(tx.status)||already.get(tx.id,tx.reviewer_id,day))continue;
+          recordAllocation(tx.id,tx.reviewer_id,u.id,t,day,'NEW',1);
+          carriedOver++;
+        }
         db.exec('COMMIT');
       }catch(e){db.exec('ROLLBACK');throw e;}
-      return json(res,200,{ok:true,assigned,reassigned,skipped,total:ready.length});
+      return json(res,200,{ok:true,assigned,reassigned,carriedOver,skipped,total:ready.length});
     }
     // Send a transaction back to Unassigned — the reverse of /api/assign, same
     // two modes (explicit ids, or a filter + expected_count for "all

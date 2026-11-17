@@ -93,6 +93,22 @@ try{
   check('import 3: nothing new or reassigned',imp.done.assigned===0&&imp.done.reassigned===0,JSON.stringify(imp.done));
   const ops2=(await req('/api/analytics/reviewers',{cookie:admin})).p.rows.find(r=>r.id===r1);
   check('import 3: counts unchanged',ops2?.assigned===4,JSON.stringify(ops2));
+  check('import 3: same-day re-import counts nothing as carried over',imp.done.carriedOver===0,JSON.stringify(imp.done));
+
+  // Next day: move every assignment record back one day, then import the same file.
+  // A, B (One) and D (Two) are still open with their reviewer -> carried over and
+  // counted for the new day; C is approved -> not counted.
+  { const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(path.join(dir,'app.db'));
+    db.exec("UPDATE allocation_events SET allocation_day=date(allocation_day,'-1 day')");db.close(); }
+  imp=await importCsv(admin,[[entry(A),'one@jsan.test'],[entry(B),'one@jsan.test'],[entry(C),'one@jsan.test'],[entry(D),'two@jsan.test']]);
+  check('next day: nothing moved',imp.done.assigned===0&&imp.done.reassigned===0,JSON.stringify(imp.done));
+  check('next day: 3 open rows counted as carried over',imp.done.carriedOver===3,JSON.stringify(imp.done));
+  const today1=(await req('/api/team',{cookie:admin})).p.rows;
+  check('next day: Team Performance today = open rows in the file per reviewer',today1.find(r=>r.id===r1)?.assigned_today===2&&today1.find(r=>r.id===r2)?.assigned_today===1,JSON.stringify(today1.map(r=>[r.id,r.assigned_today])));
+  const all=(await req('/api/analytics/reviewers',{cookie:admin})).p.rows.find(r=>r.id===r1);
+  check('Review Operations shows the carried-over part',all?.carried_over===2&&all?.assigned===6,JSON.stringify(all));
+  imp=await importCsv(admin,[[entry(A),'one@jsan.test'],[entry(B),'one@jsan.test'],[entry(C),'one@jsan.test'],[entry(D),'two@jsan.test']]);
+  check('next day: importing the file twice never double-counts',imp.done.carriedOver===0,JSON.stringify(imp.done));
 }catch(e){failures++;console.log('FAIL - unexpected: '+e.message);}
 finally{
   killTree(server);await new Promise(r=>setTimeout(r,300));
