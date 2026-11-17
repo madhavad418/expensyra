@@ -2447,7 +2447,9 @@ async function api(req,res,url){
       }));
       // Which import files the "Rows in file" column comes from: the latest
       // confirmed import of each day in the range.
-      const importFiles=db.prepare(`SELECT ir.import_day day,ir.filename,ir.imported_at,ir.total_rows,ir.unmatched_rows FROM assignment_import_runs ir WHERE ir.id IN (SELECT MAX(id) FROM assignment_import_runs WHERE (?1 IS NULL OR import_day>=?1) AND (?2 IS NULL OR import_day<=?2) GROUP BY import_day) ORDER BY ir.import_day`).all(from,to);
+      // "AS day" is required: DAY is a Postgres keyword and can't be a bare
+      // column alias (SQLite accepts it, Postgres rejects the whole query).
+      const importFiles=db.prepare(`SELECT ir.import_day AS day,ir.filename,ir.imported_at,ir.total_rows,ir.unmatched_rows FROM assignment_import_runs ir WHERE ir.id IN (SELECT MAX(id) FROM assignment_import_runs WHERE (?1 IS NULL OR import_day>=?1) AND (?2 IS NULL OR import_day<=?2) GROUP BY import_day) ORDER BY ir.import_day`).all(from,to);
       return json(res,200,{filters:{from,to},rows:withComputed,importFiles});
     }
     const reviewerDetailMatch=url.pathname.match(/^\/api\/analytics\/reviewers\/(\d+)$/);
