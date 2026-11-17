@@ -489,7 +489,7 @@ function openAssignImportModal(c){
   document.body.insertAdjacentHTML('beforeend',`<div id="assign-import-modal" class="modal-wrap"><div class="modal" style="max-width:920px">
     <div class="modal-head"><div><div class="kicker">Allocate work</div><h3>Import assignments</h3></div><button id="ai-close" class="close">×</button></div>
     <div class="modal-body">
-      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned (unless that employee is unknown to JSAN — in that case the file's Owner is trusted and saved onto the transaction instead of blocking it), and <b>Pleo Reviewer</b> holds that person's <b>email</b> — matched to an active reviewer or team lead, and shown by name once matched. Safe to re-upload the same file daily: anything already assigned and not yet approved/rejected is left alone, even if the file names someone else for it — only still-unassigned rows get assigned.</p>
+      <p class="muted small">Upload an Excel (.xlsx) or CSV file with <b>Receipt</b>, <b>Owner</b>, <b>Pleo Reviewer</b> and <b>Expense ID</b> columns. Each row is matched to a transaction by Expense ID, its Owner is checked against that transaction's employee before anything is assigned (unless that employee is unknown to JSAN — in that case the file's Owner is trusted and saved onto the transaction instead of blocking it), and <b>Pleo Reviewer</b> holds that person's <b>email</b> — matched to an active reviewer or team lead, and shown by name once matched. Safe to re-upload the same file: unassigned rows get assigned; Need info rows are reassigned to the reviewer in the file; anything already assigned and not yet approved/rejected is left with its reviewer, even if the file names someone else, and counts toward that day's Assigned; approved/rejected rows are never assigned again.</p>
       <div class="adm-actions"><button type="button" id="ai-template" class="btn btn-soft">⬇ Download template (.xlsx)</button></div>
       <label class="adm-drop" for="ai-file"><input id="ai-file" type="file" accept=".xlsx,.csv"><span class="adm-drop-icon" aria-hidden="true">⬆</span><b id="ai-file-name">Choose a file (.xlsx or .csv)</b><small>Preview first — nothing is assigned until you confirm.</small></label>
       <div class="adm-actions"><button type="button" id="ai-preview" class="btn btn-soft">Preview</button><button type="button" id="ai-confirm" class="btn btn-primary" disabled>Confirm assignment</button><button type="button" id="ai-issues" class="btn btn-excel" hidden>⬇ Download all rows (.xlsx)</button></div>
@@ -560,11 +560,14 @@ const localDay=(offset=0)=>{const x=new Date();x.setDate(x.getDate()+offset);ret
 const syncTzLabel=tz=>String(tz||'').split('/').pop().replaceAll('_',' ')+' time';
 // Shared date-range filter bar for Team Performance and Review Operations.
 // Presets are business-day buckets (same as business_day/allocation_day
-// everywhere else in this app) — "Last 24 hours" is today's business day,
-// "Last 7 days" the last 7 business days, not a rolling hour-precision window.
-const DATE_RANGE_PRESETS=includeAll=>[...(includeAll?[['all','All time']]:[]),['today','Last 24 hours'],['7d','Last 7 days'],['month','Custom month'],['custom','Custom date range']];
+// everywhere else in this app) — "Today" is today's business day, "Last 24
+// hours" yesterday + today (whole days, so it always covers the last 24
+// hours), "Last 7 days" the last 7 business days; none is an hour-precision
+// rolling window.
+const DATE_RANGE_PRESETS=includeAll=>[...(includeAll?[['all','All time']]:[]),['today','Today'],['24h','Last 24 hours'],['7d','Last 7 days'],['month','Custom month'],['custom','Custom date range']];
 function dateRangeParams(f){
   if(f.range==='today')return {dateFrom:localDay(0),dateTo:localDay(0)};
+  if(f.range==='24h')return {dateFrom:localDay(-1),dateTo:localDay(0)};
   if(f.range==='7d')return {dateFrom:localDay(-6),dateTo:localDay(0)};
   if(f.range==='month'&&f.month)return {month:f.month};
   if(f.range==='custom'&&f.dateFrom&&f.dateTo)return {dateFrom:f.dateFrom,dateTo:f.dateTo};
