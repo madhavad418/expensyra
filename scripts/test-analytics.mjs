@@ -1,4 +1,5 @@
 import {readFirstSheet} from '../lib/xlsx.mjs';
+import {DatabaseSync} from 'node:sqlite';
 // Tests for the Expense Intelligence and Review Operations analytics
 // endpoints, plus the extended /api/transactions filters they drill into.
 // Runs against the built-in Pleo mock fixture (18 known transactions) so
@@ -243,6 +244,30 @@ try{
   check('removal: other dates preserved',x.p.kpis.transactionCount===18);
   const september=await removal('preview',{dateFrom:'2026-09-01',dateTo:'2026-09-30'});
   check('removal: reviewed transaction is protected',september.p.protected>=1);
+
+  // Completed includes every decision (including Need info), while Pending
+  // only includes open transactions assigned within the selected range.
+  const remaining=(await req('/api/transactions?status=UNASSIGNED&limit=5',{cookie:adminCookie})).p.rows;
+  const [olderPending,needInfoTx]=remaining;
+  await req('/api/assign',{method:'POST',cookie:adminCookie,body:{reviewer_id:reviewerId,transaction_ids:[olderPending.id,needInfoTx.id]}});
+  const reviewerTx=(await req(`/api/transactions/${needInfoTx.id}`,{cookie:adminCookie})).p.tx;
+  await req(`/api/transactions/${needInfoTx.id}/start`,{method:'POST',cookie:reviewerCookie});
+  await req(`/api/transactions/${needInfoTx.id}/review`,{method:'POST',cookie:reviewerCookie,body:{decision:'NEEDS_INFO',notes:'Receipt Is Missing'}});
+  const reviewDay=reviewerTx.allocation_day;
+  const previousDay=new Date(`${reviewDay}T00:00:00.000Z`);
+  previousDay.setUTCDate(previousDay.getUTCDate()-1);
+  const db=new DatabaseSync(path.join(dir,'app.db'));
+  const previousDate=previousDay.toISOString().slice(0,10);
+  db.prepare('UPDATE transactions SET allocation_day=?,allocated_at=? WHERE id=?').run(previousDate,`${previousDate}T23:30:00.000Z`,olderPending.id);
+  db.prepare('UPDATE allocation_events SET allocation_day=? WHERE transaction_id=?').run(previousDate,olderPending.id);
+  db.close();
+  x=await req(`/api/analytics/reviewers?dateFrom=${reviewDay}&dateTo=${reviewDay}`,{cookie:adminCookie});
+  const todayRow=x.p.rows.find(r=>r.id===reviewerId);
+  check('reviewer-ops: completed includes approved and need-info decisions',todayRow?.completed===2&&todayRow?.approved===1&&todayRow?.needs_info===1,JSON.stringify(todayRow));
+  check('reviewer-ops: pending only includes transactions assigned in selected range',todayRow?.pending===1,JSON.stringify(todayRow));
+  x=await req('/api/analytics/reviewers',{cookie:adminCookie});
+  const allTimeRow=x.p.rows.find(r=>r.id===reviewerId);
+  check('reviewer-ops: all-time pending still includes older assignments',allTimeRow?.pending===2,JSON.stringify(allTimeRow));
 
 } catch(e){
   console.log('FAIL - unexpected exception: '+e.message);
